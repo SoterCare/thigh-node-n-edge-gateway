@@ -9,6 +9,7 @@
 #include <Adafruit_MLX90614.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_NeoPixel.h>
+#include "env.h"
 
 // --- Pin Definitions ---
 #define I2C_SDA_PIN 8
@@ -32,8 +33,6 @@ Adafruit_MLX90614 mlx = Adafruit_MLX90614();
 Adafruit_NeoPixel led(1, RGB_PIN, NEO_GRB + NEO_KHZ800);
 WiFiUDP udp;
 
-const char* ssid = "YOUR_SSID";
-const char* password = "YOUR_PASSWORD";
 const char* gatewayIP = "192.168.1.100";
 const int udpPort = 1234;
 
@@ -53,6 +52,10 @@ bool isScreenAwake = true;
 bool usingWiFi = false;
 bool oledInitialized = false;
 
+// Sensor State Tracking
+int currentRawMoisture = 0;
+int currentMoisturePercent = 0;
+
 // Button Logic
 unsigned long btnEnterPressTime = 0;
 bool btnEnterHeld = false;
@@ -64,7 +67,8 @@ enum MenuState {
   MENU_SENSOR_LIST, 
   MENU_SENSOR_VIEW, 
   MENU_LOG, 
-  MENU_NETWORK 
+  MENU_NETWORK,
+  MENU_SERIAL_MONITOR
 };
 MenuState currentMenu = MENU_MAIN; 
 
@@ -82,6 +86,11 @@ struct ErrorLog {
 };
 ErrorLog errorLogs[5];
 int errorIndex = 0;
+
+// Serial Logger
+String serialLogs[20];
+int serialLogIndex = 0;
+int serialLogScroll = 0; // Tracks which log is at the top of the OLED
 
 // --- Helper Functions ---
 void logError(String msg) {
@@ -101,8 +110,60 @@ void triggerHaptic(int duration) {
   digitalWrite(MOTOR_PIN, LOW);
 }
 
+void systemPrint(String msg) {
+  // Add to circular buffer
+  serialLogs[serialLogIndex] = msg;
+  serialLogIndex = (serialLogIndex + 1) % 20;
+  
+  // Also print to actual Serial monitor
+  Serial.println(msg);
+}
+
+// Signal Strength Graphics
+void drawSignalBars(int startX, int startY, int strength, bool isWiFi) {
+  // Draw Icon String (W or B)
+  display.setCursor(startX, startY);
+  display.print(isWiFi ? "W " : "B ");
+  
+  if (strength < 0) { // Disconnected state
+    display.print("x");
+    return;
+  }
+  
+  // Draw Nokia-style ascending bars
+  // Max 4 bars. Each bar is 2px wide with 1px gap
+  for (int i = 0; i < 4; i++) {
+    int barX = startX + 12 + (i * 3);
+    int barHeight = 2 + (i * 2); // Heights: 2, 4, 6, 8
+    int barY = startY + 8 - barHeight; 
+    
+    if (i < strength) {
+      display.fillRect(barX, barY, 2, barHeight, SSD1306_WHITE); // Filled bar
+    } else {
+      display.drawRect(barX, barY, 2, barHeight, SSD1306_WHITE); // Empty outline
+    }
+  }
+}
+
+int getWiFiStrengthLevel() {
+  if (WiFi.status() != WL_CONNECTED) return -1;
+  long rssi = WiFi.RSSI();
+  if (rssi > -60) return 4;
+  else if (rssi > -70) return 3;
+  else if (rssi > -80) return 2;
+  else return 1;
+}
+
+int getBLEStrengthLevel() {
+  if (!bleConnected) return -1;
+  return 4; // Fake max strength for connected BLE server
+}
+
 // Live Boot Screen Updater
 void printBootStatus(String step, String status) {
+  String fullMsg = step + status;
+  systemPrint(fullMsg);
+
   if (oledInitialized) {
     display.clearDisplay();
     display.setTextSize(1);
@@ -110,18 +171,23 @@ void printBootStatus(String step, String status) {
     display.setCursor(0,0);
     display.println("SoterCare Boot...");
     display.println("-----------------");
-    display.print(step);
-    display.println(status);
+    display.println(fullMsg);
     display.display();
   }
-  Serial.print(step); Serial.println(status);
 }
 
 // --- BLE Server Callbacks ---
 class MyServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) { bleConnected = true; };
+    void onConnect(BLEServer* pServer) { 
+      bleConnected = true; 
+      systemPrint("BLE Connection Established!");
+      if (!usingWiFi && netMode == MODE_AUTO) {
+        setLED(0, 128, 255); // Solid Blue
+      }
+    };
     void onDisconnect(BLEServer* pServer) {
       bleConnected = false;
+      systemPrint("BLE Connection Lost!");
       pServer->startAdvertising(); 
     }
 };
@@ -146,7 +212,7 @@ void setup() {
   
   // Init OLED
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println("OLED init failed");
+    systemPrint("OLED init failed");
     oledInitialized = false;
   } else {
     oledInitialized = true;
@@ -198,32 +264,21 @@ void setup() {
   printBootStatus("BLE Radio: ", "Ready");
   delay(500);
 
-  // Init Wi-Fi
-  printBootStatus("Wi-Fi: ", "Connecting...");
+  // Init Wi-Fi (Non-blocking start)
+  printBootStatus("Wi-Fi: ", "Starting Discovery...");
   WiFi.begin(ssid, password);
-  unsigned long wifiWait = millis();
-  while(WiFi.status() != WL_CONNECTED && millis() - wifiWait < 5000) { 
-    delay(100); 
-  }
-  
-  if(WiFi.status() == WL_CONNECTED) {
-    usingWiFi = true;
-    setLED(0, 255, 0); 
-    printBootStatus("Wi-Fi: ", "Connected!");
-  } else {
-    usingWiFi = false;
-    logError("WiFi Drop at Boot");
-    setLED(0, 128, 255); 
-    printBootStatus("Wi-Fi: ", "Failed (BLE Mode)");
-  }
-  delay(1000);
+  systemPrint("Hunting for Any Connection...");
 
   lastButtonPressTime = millis();
 }
 
+unsigned long lastBlinkTime = 0;
+bool ledBlinkState = false;
+
 // --- Main Loop ---
 void loop() {
   mpu.update(); 
+  updateMoisture();
 
   handleButtons();
   handleScreen(); 
@@ -237,20 +292,39 @@ void loop() {
 }
 
 // --- Data & Comms ---
+void updateMoisture() {
+  static unsigned long lastMoistureRead = 0;
+  static int readingHistory[5] = {0,0,0,0,0};
+  static int readIndex = 0;
+  
+  if (millis() - lastMoistureRead >= 100) { // Poll every 100ms
+    lastMoistureRead = millis();
+    
+    // Add new reading to history
+    readingHistory[readIndex] = analogRead(MOISTURE_A0_PIN);
+    readIndex = (readIndex + 1) % 5;
+    
+    // Calculate running average (simulates 500ms stable window)
+    long total = 0;
+    for (int i = 0; i < 5; i++) {
+      total += readingHistory[i];
+    }
+    
+    currentRawMoisture = total / 5;
+    currentMoisturePercent = constrain(map(currentRawMoisture, 4095, 1200, 0, 100), 0, 100);
+  }
+}
+
 void sendData() {
   Wire.setClock(100000);
   float temp = mlx.readObjectTempC();
   Wire.setClock(400000);
   
-  int rawMoisture = analogRead(MOISTURE_A0_PIN);
-  int moisturePercent = map(rawMoisture, 4095, 1200, 0, 100);
-  moisturePercent = constrain(moisturePercent, 0, 100);
-  
   String payload = String(mpu.getAccX()) + "," + 
                    String(mpu.getAccY()) + "," + 
                    String(mpu.getAccZ()) + "," + 
                    String(temp) + "," + 
-                   String(moisturePercent) + "\n"; 
+                   String(currentMoisturePercent) + "\n"; 
 
   bool routeWiFi = (netMode == MODE_WIFI_ONLY) || (netMode == MODE_AUTO && usingWiFi);
 
@@ -265,26 +339,48 @@ void sendData() {
 }
 
 void checkNetworkStability() {
-  static bool wasConnected = (WiFi.status() == WL_CONNECTED);
-  bool isConnected = (WiFi.status() == WL_CONNECTED);
+  bool isConnectedWiFi = (WiFi.status() == WL_CONNECTED);
 
-  if (wasConnected && !isConnected) {
-    logError("WiFi Disconn");
-    wasConnected = false;
-    if (netMode == MODE_AUTO) { usingWiFi = false; setLED(0, 128, 255); }
+  // Detect Wi-Fi connection gained
+  if (!usingWiFi && isConnectedWiFi) {
+    systemPrint("WiFi Connection Established!");
+    usingWiFi = true;
+    if (netMode == MODE_AUTO) setLED(0, 255, 0); // Solid Green
   } 
-  else if (!wasConnected && isConnected) {
-    logError("WiFi Restored");
-    wasConnected = true;
-    if (netMode == MODE_AUTO) { usingWiFi = true; setLED(0, 255, 0); }
+  
+  // Detect Wi-Fi connection lost
+  else if (usingWiFi && !isConnectedWiFi) {
+    systemPrint("WiFi Connection Lost!");
+    usingWiFi = false;
+    logError("WiFi Disconn");
   }
 
-  if (!isConnected && netMode != MODE_BLE_ONLY) {
-    static unsigned long lastReconnectAttempt = 0;
-    if (millis() - lastReconnectAttempt > 5000) {
-      lastReconnectAttempt = millis();
-      WiFi.disconnect();
-      WiFi.begin(ssid, password);
+  // --- Connection Hunting Logic ---
+  if (netMode == MODE_AUTO) {
+    if (!usingWiFi && !bleConnected) {
+      // Actively hunting for both. Blink Green and Blue.
+      if (millis() - lastBlinkTime > 500) {
+        lastBlinkTime = millis();
+        ledBlinkState = !ledBlinkState;
+        if (ledBlinkState) setLED(0, 255, 0); // Green
+        else setLED(0, 128, 255);             // Blue
+      }
+    } 
+    else if (!usingWiFi && bleConnected) {
+      // BLE connected but WiFi is down. Fallback state.
+      setLED(0, 128, 255); // Solid Blue
+    }
+    
+    // If WiFi is down, try to restart connection process every 10 seconds 
+    // This runs silently in the background even if BLE is currently connected!
+    if (!usingWiFi) {
+      static unsigned long lastReconnectAttempt = 0;
+      if (millis() - lastReconnectAttempt > 10000) {
+        lastReconnectAttempt = millis();
+        systemPrint("Attempting Wi-Fi re-connect...");
+        WiFi.disconnect();
+        WiFi.begin(ssid, password);
+      }
     }
   }
 }
@@ -321,7 +417,7 @@ void handleButtons() {
     lastButtonPressTime = millis();
     isScreenAwake = true;
     if (currentMenu == MENU_OFF) currentMenu = MENU_MAIN;
-    logError("SOS Triggered");
+    systemPrint("SOS Triggered");
     triggerHaptic(500);
     delay(500); 
     return; 
@@ -343,18 +439,24 @@ void handleButtons() {
   // UP Button List Scrolling
   if (digitalRead(BTN_UP) == LOW) {
     triggerHaptic(30);
-    if (currentMenu == MENU_MAIN) mainMenuCursor = (mainMenuCursor - 1 + 3) % 3;
+    if (currentMenu == MENU_MAIN) mainMenuCursor = (mainMenuCursor - 1 + 4) % 4; // Now 4 items
     else if (currentMenu == MENU_SENSOR_LIST) sensorMenuCursor = (sensorMenuCursor - 1 + 3) % 3;
     else if (currentMenu == MENU_NETWORK) networkMenuCursor = (networkMenuCursor - 1 + 3) % 3;
+    else if (currentMenu == MENU_SERIAL_MONITOR) {
+      if (serialLogScroll > 0) serialLogScroll--;
+    }
     delay(200); 
   }
   
   // DOWN Button List Scrolling
   if (digitalRead(BTN_DOWN) == LOW) {
     triggerHaptic(30);
-    if (currentMenu == MENU_MAIN) mainMenuCursor = (mainMenuCursor + 1) % 3; 
+    if (currentMenu == MENU_MAIN) mainMenuCursor = (mainMenuCursor + 1) % 4; 
     else if (currentMenu == MENU_SENSOR_LIST) sensorMenuCursor = (sensorMenuCursor + 1) % 3; 
     else if (currentMenu == MENU_NETWORK) networkMenuCursor = (networkMenuCursor + 1) % 3;
+    else if (currentMenu == MENU_SERIAL_MONITOR) {
+      if (serialLogScroll < 20 - 5) serialLogScroll++; // Keep within 20 bounds, display 5 lines at a time
+    }
     delay(200);
   }
 
@@ -367,7 +469,10 @@ void handleButtons() {
       triggerHaptic(100);
       
       if (currentMenu == MENU_SENSOR_VIEW) currentMenu = MENU_SENSOR_LIST;
-      else if (currentMenu == MENU_SENSOR_LIST || currentMenu == MENU_LOG || currentMenu == MENU_NETWORK) currentMenu = MENU_MAIN;
+      else if (currentMenu == MENU_SENSOR_LIST || currentMenu == MENU_LOG || currentMenu == MENU_NETWORK || currentMenu == MENU_SERIAL_MONITOR) {
+        currentMenu = MENU_MAIN;
+        serialLogScroll = 0; // Reset scroll when leaving
+      }
       else if (currentMenu == MENU_MAIN) {
         currentMenu = MENU_OFF; 
         isScreenAwake = false;
@@ -382,6 +487,7 @@ void handleButtons() {
         if (mainMenuCursor == 0) currentMenu = MENU_SENSOR_LIST;
         else if (mainMenuCursor == 1) currentMenu = MENU_LOG;
         else if (mainMenuCursor == 2) currentMenu = MENU_NETWORK;
+        else if (mainMenuCursor == 3) currentMenu = MENU_SERIAL_MONITOR;
       }
       else if (currentMenu == MENU_SENSOR_LIST) {
         currentMenu = MENU_SENSOR_VIEW;
@@ -428,11 +534,28 @@ void handleScreen() {
   display.setCursor(0,0);
 
   if (currentMenu == MENU_MAIN) {
-    display.println("SoterCare Thigh Node");
+    display.print("SoterCare");
+    
+    // Draw Signal Strength in Top Right
+    // W bars at x=70, B bars at x=100
+    drawSignalBars(70, 0, getWiFiStrengthLevel(), true);
+    drawSignalBars(100, 0, getBLEStrengthLevel(), false);
+    
+    display.setCursor(0, 10);
     display.println("--------------------");
-    display.println(mainMenuCursor == 0 ? "> Sensor Test" : "  Sensor Test");
-    display.println(mainMenuCursor == 1 ? "> Error Log" : "  Error Log");
-    display.println(mainMenuCursor == 2 ? "> Network Mode" : "  Network Mode");
+    
+    // Draw exactly 4 items simultaneously
+    for (int i = 0; i < 4; i++) {
+      String linePrefix = (mainMenuCursor == i) ? "> " : "  ";
+      String itemName = "";
+      
+      if (i == 0) itemName = "Sensor Test";
+      else if (i == 1) itemName = "Error Log";
+      else if (i == 2) itemName = "Network Mode";
+      else if (i == 3) itemName = "Monitor";
+      
+      display.println(linePrefix + itemName);
+    }
   } 
   
   else if (currentMenu == MENU_SENSOR_LIST) {
@@ -462,11 +585,9 @@ void handleScreen() {
       display.printf("Amb: %.2f C\n", ambTemp);
     }
     else if (sensorMenuCursor == 2) {
-      int rawM = analogRead(MOISTURE_A0_PIN);
-      int perc = constrain(map(rawM, 4095, 1200, 0, 100), 0, 100);
       display.println("--- MOISTURE ---");
-      display.printf("Raw ADC: %d\n", rawM);
-      display.printf("Moisture: %d %%\n", perc);
+      display.printf("Raw ADC: %d\n", currentRawMoisture);
+      display.printf("Moisture: %d %%\n", currentMoisturePercent);
     }
     display.setCursor(0, 55);
     display.print("[Hold ENTER to Back]");
@@ -506,6 +627,28 @@ void handleScreen() {
     
     display.setCursor(0, 55);
     display.print("[Hold ENTER to Back]");
+  }
+  
+  else if (currentMenu == MENU_SERIAL_MONITOR) {
+    display.println("--- MONITOR ---");
+    // Sort array by time: print oldest to newest. 
+    // serialLogIndex points to the OLDEST entry (next to be overwritten).
+    int linesShown = 0;
+    
+    for (int i = 0; i < 20; i++) {
+        if (linesShown >= 6) break; // Out of vertical screen space
+        
+        int physicalIdx = (serialLogIndex + i) % 20;
+        
+        if (serialLogs[physicalIdx].length() > 0) {
+            // Only start drawing once we reach the scroll offset
+            if (i >= serialLogScroll) {
+                // Truncate strings to screen width (~20 chars max for text size 1)
+                display.println(serialLogs[physicalIdx].substring(0, 20)); 
+                linesShown++;
+            }
+        }
+    }
   }
   
   display.display();

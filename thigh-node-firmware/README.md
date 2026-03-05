@@ -2,6 +2,23 @@
 
 This directory contains the firmware for the SoterCare Thigh Node, a wearable monitoring device built around an ESP32. It reads data from multiple sensors, coordinates local UI feedback, and streams data either over Wi-Fi (UDP) or Bluetooth Low Energy (BLE).
 
+## Initial Setup: Wi-Fi Credentials
+
+Before you can run or compile this firmware, you need to create a `env.h` file in the same directory as the `.ino` file to securely store your Wi-Fi credentials.
+
+This file is excluded from Git to prevent accidental leaks. Create the file and add the following contents:
+
+```cpp
+#ifndef ENV_H
+#define ENV_H
+
+// --- Wi-Fi Credentials ---
+const char* ssid = "YOUR_WIFI_SSID_HERE";
+const char* password = "YOUR_WIFI_PASSWORD_HERE";
+
+#endif
+```
+
 ## Core Features and Functions
 
 - **Sensing:**
@@ -40,17 +57,18 @@ The node features an interactive OLED menu driven by three main navigation butto
 - **UP / DOWN:** Scrolls through lists and options. Haptic feedback is triggered on press.
 - **ENTER (Short Press):** Selects the highlighted item or enters a sub-menu.
 - **ENTER (Hold for >800ms):** Goes back to the previous menu. Holding it on the main menu turns the screen off manually.
-- **SOS Button:** Immediately triggers the vibration motor, logs "SOS Triggered" in the error system, and wakes the screen.
+- **SOS Button:** Immediately triggers the vibration motor, logs "SOS Triggered" to the Serial Monitor, and wakes the screen.
 
 ### Menu Structure
 
-1. **Main Menu**
+1. **Main Menu** (Header features graphical "Nokia-style" ascending signal bars for Wi-Fi and BLE connections)
    - **Sensor Test:** Live view of local sensors.
      - _IMU (MPU6050):_ Live feed of X, Y, Z acceleration.
      - _MLX Temp:_ Live feed of Object and Ambient temperature in Celsius.
      - _Moisture:_ Live view of raw ADC value and calculated percentage.
    - **Error Log:** Displays the 5 most recent system errors.
    - **Network Mode:** Let you override connectivity. Switch between Auto, Wi-Fi Only, and BLE Only.
+   - **Monitor:** A built-in serial monitor that mirrors the last 20 `Serial.print` operations directly to the OLED. Useful for debugging without a PC connection. Use the UP/DOWN buttons to scroll through the log buffer.
 
 ## LED Indications
 
