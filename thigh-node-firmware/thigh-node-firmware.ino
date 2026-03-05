@@ -33,7 +33,7 @@ Adafruit_MLX90614 mlx = Adafruit_MLX90614();
 Adafruit_NeoPixel led(1, RGB_PIN, NEO_GRB + NEO_KHZ800);
 WiFiUDP udp;
 
-const char* gatewayIP = "192.168.1.100";
+const char* gatewayIP = "192.168.1.11";
 const int udpPort = 1234;
 
 // --- BLE Nordic UART Service UUIDs ---
@@ -362,43 +362,55 @@ void sendData() {
 void checkNetworkStability() {
   bool isConnectedWiFi = (WiFi.status() == WL_CONNECTED);
 
-  // Detect Wi-Fi connection gained
+  // ── Wi-Fi just connected ──────────────────────────────────────────────────
   if (!usingWiFi && isConnectedWiFi) {
     systemPrint("WiFi Connection Established!");
     usingWiFi = true;
-    if (netMode == MODE_AUTO) setLED(0, 255, 0); // Solid Green
-  } 
-  
-  // Detect Wi-Fi connection lost
-  else if (usingWiFi && !isConnectedWiFi) {
-    systemPrint("WiFi Connection Lost!");
-    usingWiFi = false;
-    logError("WiFi Disconn");
+    if (netMode == MODE_AUTO) {
+      setLED(0, 255, 0); // Solid Green
+      // Stop BLE advertising — no need while Wi-Fi is healthy
+      if (pServer != NULL) {
+        pServer->getAdvertising()->stop();
+        systemPrint("BLE Advertising Paused (WiFi active)");
+      }
+    }
   }
 
-  // --- Connection Hunting Logic ---
+  // ── Wi-Fi just dropped ────────────────────────────────────────────────────
+  else if (usingWiFi && !isConnectedWiFi) {
+    systemPrint("WiFi Connection Lost! Starting BLE immediately...");
+    usingWiFi = false;
+    logError("WiFi Disconn");
+    if (netMode == MODE_AUTO) {
+      // Start BLE advertising immediately so client can connect ASAP
+      if (pServer != NULL) {
+        pServer->startAdvertising();
+        systemPrint("BLE Advertising Started (WiFi lost)");
+      }
+    }
+  }
+
+  // ── Connection Hunting Logic (AUTO mode) ──────────────────────────────────
   if (netMode == MODE_AUTO) {
     if (!usingWiFi && !bleConnected) {
-      // Actively hunting for both. Blink Green and Blue.
+      // Hunting for both — blink Green/Blue
       if (millis() - lastBlinkTime > 500) {
         lastBlinkTime = millis();
         ledBlinkState = !ledBlinkState;
-        if (ledBlinkState) setLED(0, 255, 0); // Green
-        else setLED(0, 128, 255);             // Blue
+        if (ledBlinkState) setLED(0, 255, 0);
+        else setLED(0, 128, 255);
       }
-    } 
-    else if (!usingWiFi && bleConnected) {
-      // BLE connected but WiFi is down. Fallback state.
-      setLED(0, 128, 255); // Solid Blue
     }
-    
-    // If WiFi is down, try to restart connection process every 10 seconds 
-    // This runs silently in the background even if BLE is currently connected!
+    else if (!usingWiFi && bleConnected) {
+      setLED(0, 128, 255); // Solid Blue — BLE fallback active
+    }
+
+    // While on BLE fallback, keep retrying Wi-Fi every 5s
     if (!usingWiFi) {
       static unsigned long lastReconnectAttempt = 0;
-      if (millis() - lastReconnectAttempt > 10000) {
+      if (millis() - lastReconnectAttempt > 5000) {
         lastReconnectAttempt = millis();
-        systemPrint("Attempting Wi-Fi re-connect...");
+        systemPrint("Hunting WiFi...");
         WiFi.disconnect();
         WiFi.begin(ssid, password);
       }

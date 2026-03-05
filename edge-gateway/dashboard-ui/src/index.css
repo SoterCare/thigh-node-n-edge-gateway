@@ -1,0 +1,333 @@
+/* SoterCare Dashboard — Global Styles (white-based modern design) */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --font: "Inter", sans-serif;
+  --bg: #f5f7fa;
+  --surface: #ffffff;
+  --border: #e8ecf2;
+  --text-1: #0f172a;
+  --text-2: #475569;
+  --text-3: #94a3b8;
+  --blue: #3b82f6;
+  --blue-lt: #eff6ff;
+  --indigo: #6366f1;
+  --green: #22c55e;
+  --green-lt: #f0fdf4;
+  --amber: #f59e0b;
+  --amber-lt: #fffbeb;
+  --red: #ef4444;
+  --red-lt: #fef2f2;
+  --purple: #a855f7;
+  --purple-lt: #faf5ff;
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --radius: 14px;
+  --radius-sm: 8px;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text-1);
+}
+
+/* ── Layout ── */
+.layout {
+  display: grid;
+  grid-template-rows: 64px 1fr;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Header ── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 28px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  z-index: 10;
+}
+
+.header-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.header-logo {
+  width: 36px;
+  height: 36px;
+  background: linear-gradient(135deg, var(--blue), var(--indigo));
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 14px;
+  color: #fff;
+  letter-spacing: -0.5px;
+}
+.header-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+.header-sub {
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+/* Connection pill */
+.conn-pill {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid transparent;
+  transition: all 0.3s;
+}
+.conn-pill.wifi {
+  background: var(--green-lt);
+  color: #166534;
+  border-color: #bbf7d0;
+}
+.conn-pill.ble {
+  background: var(--blue-lt);
+  color: #1e40af;
+  border-color: #bfdbfe;
+}
+.conn-pill.search {
+  background: #f8fafc;
+  color: var(--text-2);
+  border-color: var(--border);
+}
+.conn-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: blink 1.4s infinite;
+}
+.conn-pill.wifi .conn-dot {
+  background: var(--green);
+  animation: none;
+}
+.conn-pill.ble .conn-dot {
+  background: var(--blue);
+  animation: none;
+}
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.2;
+  }
+}
+
+.header-clock {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+.fps-badge {
+  font-size: 11px;
+  color: var(--text-3);
+  background: var(--bg);
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+
+/* ── Content ── */
+.content {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 20px;
+  padding: 20px 24px;
+  overflow: hidden;
+}
+
+/* ── Chart panel ── */
+.charts-col {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: hidden;
+}
+
+/* ── Stat col ── */
+.stats-col {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+/* ── Card ── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  box-shadow: var(--shadow-sm);
+}
+.card-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-3);
+  margin-bottom: 12px;
+}
+.card-value {
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -1px;
+}
+.card-unit {
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-3);
+  margin-left: 3px;
+}
+.card-sub {
+  font-size: 12px;
+  color: var(--text-3);
+  margin-top: 6px;
+}
+
+/* Colour variants */
+.card.blue .card-value {
+  color: var(--blue);
+}
+.card.green .card-value {
+  color: var(--green);
+}
+.card.amber .card-value {
+  color: var(--amber);
+}
+.card.purple .card-value {
+  color: var(--purple);
+}
+.card.red-card {
+  border-color: var(--red);
+  background: var(--red-lt);
+}
+.card.red-card .card-value {
+  color: var(--red);
+}
+
+/* Chart card */
+.chart-card {
+  flex: 1;
+  min-height: 0;
+}
+.chart-card .chart-wrap {
+  height: calc(100% - 32px);
+  position: relative;
+}
+
+/* Gait card */
+.gait-chip {
+  display: inline-block;
+  padding: 4px 14px;
+  border-radius: 999px;
+  background: var(--purple-lt);
+  color: var(--purple);
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid #e9d5ff;
+}
+
+/* Moisture bar */
+.moisture-bar-bg {
+  height: 8px;
+  border-radius: 99px;
+  background: var(--border);
+  margin-top: 10px;
+  overflow: hidden;
+}
+.moisture-bar-fill {
+  height: 100%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, var(--blue), var(--indigo));
+  transition: width 0.4s ease;
+}
+
+/* RSSI signal bars (visual) */
+.rssi-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 20px;
+}
+.rssi-bar {
+  width: 6px;
+  border-radius: 2px;
+  background: var(--border);
+  transition: background 0.3s;
+}
+.rssi-bar.active {
+  background: var(--green);
+}
+.rssi-val {
+  font-size: 12px;
+  color: var(--text-3);
+  margin-top: 6px;
+}
+
+/* Fall alert */
+.fall-ok {
+  color: var(--green);
+  font-weight: 600;
+  font-size: 15px;
+}
+.fall-alert-text {
+  color: var(--red);
+  font-weight: 700;
+  font-size: 15px;
+  animation: pulse-red 0.6s 6;
+}
+@keyframes pulse-red {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* Scrollbar */
+.stats-col::-webkit-scrollbar {
+  width: 4px;
+}
+.stats-col::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
