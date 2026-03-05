@@ -1,119 +1,51 @@
 # SoterCare Edge Gateway
 
-Raspberry Pi 5 edge gateway for the SoterCare wearable health monitoring system. Receives sensor data from the **SoterCare Thigh Node** (ESP32-S3) via Wi-Fi UDP or BLE fallback, runs an Edge Impulse gait analysis model, stores results to Redis, and serves a real-time touchscreen dashboard.
-
----
-
-## Hardware Requirements
-
-| Component        | Specification                                          |
-| ---------------- | ------------------------------------------------------ |
-| **Raspberry Pi** | Pi 5 (4GB or 8GB RAM recommended)                      |
-| **Power Supply** | Official 27W USB-C PSU                                 |
-| **Display**      | 5" DSI touchscreen (800×480) or HDMI equivalent        |
-| **Networking**   | Ethernet or Wi-Fi on the same subnet as the Thigh Node |
+Raspberry Pi 5 edge gateway for the SoterCare wearable health monitoring system. Receives sensor data from the **SoterCare Thigh Node** (ESP32-S3) via Wi-Fi UDP (primary) or BLE fallback, runs an Edge Impulse gait analysis model, stores results to Redis, and serves a live Vite React dashboard.
 
 ---
 
 ## How the Thigh Node Connects
 
-The ESP32-S3 Thigh Node firmware (`thigh-node-firmware.ino`) uses a dual-stack strategy:
+The ESP32-S3 Thigh Node uses a dual-stack strategy:
 
-| Thigh Node Mode | Data Path                                         | Pi receives                                                     |
-| --------------- | ------------------------------------------------- | --------------------------------------------------------------- |
-| Wi-Fi (primary) | UDP datagrams → **`192.168.1.100:1234`** at ~60Hz | 6-field CSV: `AccX,AccY,AccZ,ObjTempC,MoisturePercent,RSSI_dBm` |
-| BLE (fallback)  | BLE notify on `MedNode_BLE` Nordic UART TX        | 5-field CSV: `AccX,AccY,AccZ,ObjTempC,MoisturePercent`          |
+| Thigh Node State | Transport                              | Gateway receives                                                |
+| ---------------- | -------------------------------------- | --------------------------------------------------------------- |
+| Wi-Fi connected  | UDP → **`<gateway-ip>:1234`** at ~60Hz | 6-field CSV: `AccX,AccY,AccZ,ObjTempC,MoisturePercent,RSSI_dBm` |
+| Wi-Fi lost       | BLE notify on `MedNode_BLE` at ~60Hz   | 5-field CSV: `AccX,AccY,AccZ,ObjTempC,MoisturePercent`          |
 
-> **Critical:** The Pi **must** be assigned the static IP `192.168.1.100` on its local interface. The Thigh Node firmware hardcodes this as the UDP target.
+> The firmware hardcodes the UDP destination IP. Update `gatewayIP` in `thigh-node-firmware.ino` line ~36 to match your gateway machine's IP before flashing.
 
-The gateway automatically detects which transport is active. If UDP is silent for >2 seconds, the BLE fallback process activates and connects to `MedNode_BLE`. When UDP resumes, BLE is released.
-
----
-
-## Setup
-
-### 1. Assign Static IP to the Pi
-
-```bash
-# Edit /etc/dhcpcd.conf and add:
-interface eth0        # or wlan0
-static ip_address=192.168.1.100/24
-static routers=192.168.1.1
-static domain_name_servers=192.168.1.1
-sudo systemctl restart dhcpcd
-```
-
-### 2. Install System Dependencies
-
-```bash
-sudo apt update && sudo apt install -y \
-  python3-pip python3-venv redis-server \
-  espeak-ng bluetooth bluez libbluetooth-dev
-sudo systemctl enable redis-server
-```
-
-### 3. Install Python Dependencies
-
-```bash
-cd edge-gateway
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-### 4. Place the Edge Impulse Model
-
-Export your project as a **Linux (aarch64)** runner from Edge Impulse Dashboard → Deployment → Linux (AARCH64).  
-Place the binary at:
-
-```
-edge-gateway/model/gait_model.eim
-```
-
-Make it executable:
-
-```bash
-chmod +x model/gait_model.eim
-```
-
-### 5. Tune Redis
-
-```bash
-bash scripts/tune_redis.sh
-```
-
-### 6. Run the Gateway
-
-```bash
-# Terminal 1
-source .venv/bin/activate
-python3 gateway_master.py
-
-# Terminal 2
-cd dashboard && python3 app.py
-```
-
-Open `http://localhost:5000` in a browser to see the live dashboard.
-
-### 7. Set Up Kiosk Mode (optional, for Pi display)
-
-```bash
-bash scripts/setup_kiosk.sh
-sudo reboot
-```
-
-The Pi will boot directly into the fullscreen dashboard.
+- BLE Device Name: `MedNode_BLE`
+- BLE TX Characteristic: `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` (Nordic UART)
+- The node retries Wi-Fi every 5 seconds while on BLE fallback.
+- BLE advertising stops automatically when Wi-Fi is healthy.
 
 ---
 
-## Python Dependencies (`requirements.txt`)
+## Architecture
 
 ```
-flask
-flask-socketio
-eventlet
-redis
-bleak
-edge-impulse-linux
+Thigh Node
+   │
+   ├── UDP :1234 ──────────────────────────────────┐
+   └── BLE (MedNode_BLE) ──────────────────────────┤
+                                                    ▼
+                                          gateway_master.py
+                                    (asyncio + threading, single process)
+                                          │ Resample 60Hz → 50Hz
+                                          │ G_total + fall detection
+                                          │ Edge Impulse gait model
+                                          ▼
+                                       Redis Stream
+                                     sotercare_history
+                                          │
+                                          ▼
+                                       server.py
+                                  (Flask-SocketIO, threading mode)
+                                          │ WebSocket
+                                          ▼
+                                    dashboard-ui/
+                                  (Vite React, port 5173)
 ```
 
 ---
@@ -122,16 +54,129 @@ edge-impulse-linux
 
 ```
 edge-gateway/
-├── gateway_master.py          # Main gateway process
-├── dashboard/
-│   ├── app.py                 # Flask-SocketIO dashboard server
-│   └── templates/
-│       └── index.html         # 800×480 real-time UI
+├── gateway_master.py       # Data receiver, resampler, AI pipeline, Redis writer
+├── server.py               # Flask-SocketIO WebSocket server
+├── dashboard-ui/           # Vite React live dashboard (http://localhost:5173)
+│   ├── src/App.jsx
+│   ├── src/index.css
+│   └── package.json
 ├── model/
-│   └── gait_model.eim         # Edge Impulse binary (add manually)
+│   └── gait_model.eim      # Edge Impulse binary — add manually
 ├── scripts/
-│   ├── setup_kiosk.sh         # Chromium kiosk autostart setup
-│   └── tune_redis.sh          # Redis in-memory optimisation
+│   ├── setup_kiosk.sh      # Chromium kiosk autostart (Pi)
+│   └── tune_redis.sh       # Redis in-memory tuning
+├── requirements.txt
 ├── .gitignore
 └── README.md
+```
+
+---
+
+## Setup — Windows / Dev Machine
+
+### 1. Redis (via WSL)
+
+```powershell
+# PowerShell (Admin):
+wsl --install
+```
+
+```bash
+# Ubuntu (WSL):
+sudo apt update && sudo apt install -y redis-server
+sudo service redis-server start
+redis-cli ping   # → PONG
+```
+
+### 2. Python Dependencies
+
+```cmd
+cd edge-gateway
+python -m venv .venv
+.venv\Scripts\activate
+pip install flask flask-socketio simple-websocket redis bleak
+```
+
+> Skip `edge-impulse-linux` on Windows — the gateway handles its absence gracefully and sets gait label to `N/A`.
+
+### 3. Dashboard Dependencies
+
+```cmd
+cd dashboard-ui
+npm install
+```
+
+### 4. Firewall — Allow UDP Port 1234
+
+```powershell
+# PowerShell (Admin):
+New-NetFirewallRule -DisplayName "SoterCare UDP 1234" -Direction Inbound -Protocol UDP -LocalPort 1234 -Action Allow
+```
+
+### 5. Update Firmware Gateway IP
+
+Find your PC's IP with `ipconfig`. Open `thigh-node-firmware.ino` line ~36 and set:
+
+```cpp
+const char* gatewayIP = "YOUR_PC_IP";
+```
+
+Re-flash the Thigh Node.
+
+---
+
+## Running (4 terminals)
+
+| Terminal | Command                           | Purpose                          |
+| -------- | --------------------------------- | -------------------------------- |
+| 1 (WSL)  | `sudo service redis-server start` | Redis data store                 |
+| 2        | `python gateway_master.py`        | Receive from Thigh Node → Redis  |
+| 3        | `python server.py`                | WebSocket bridge → Dashboard     |
+| 4        | `cd dashboard-ui && npm run dev`  | Vite UI at http://localhost:5173 |
+
+---
+
+## Setup — Raspberry Pi 5 (Production)
+
+### System Dependencies
+
+```bash
+sudo apt update && sudo apt install -y \
+  python3-pip python3-venv redis-server \
+  espeak-ng bluetooth bluez libbluetooth-dev nodejs npm
+sudo systemctl enable redis-server
+```
+
+### Assign Static IP
+
+```bash
+# /etc/dhcpcd.conf:
+interface eth0
+static ip_address=192.168.1.x/24
+static routers=192.168.1.1
+static domain_name_servers=192.168.1.1
+sudo systemctl restart dhcpcd
+```
+
+### Edge Impulse Model
+
+Export as **Linux (aarch64)** from Edge Impulse → Deployment → Linux (AARCH64).
+
+```bash
+cp gait_model.eim edge-gateway/model/
+chmod +x edge-gateway/model/gait_model.eim
+pip install edge-impulse-linux
+```
+
+### Redis Tuning
+
+```bash
+bash scripts/tune_redis.sh
+```
+
+### Kiosk Mode
+
+```bash
+bash scripts/setup_kiosk.sh
+sudo reboot
 ```

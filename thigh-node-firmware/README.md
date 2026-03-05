@@ -18,7 +18,7 @@ const char* password = "YOUR_WIFI_PASSWORD_HERE";
 #endif
 ```
 
-> This file is listed in `.gitignore` and will **never be committed to Git**.
+> **Before flashing:** Open `thigh-node-firmware.ino` line ~36 and set `gatewayIP` to the IP address of your gateway machine (run `ipconfig` on Windows or `hostname -I` on Linux to find it).
 
 ---
 
@@ -27,10 +27,13 @@ const char* password = "YOUR_WIFI_PASSWORD_HERE";
 On boot, the device initialises all hardware subsystems in sequence (OLED, Temp Sensor, IMU, BLE, Wi-Fi) and displays a live boot log on the OLED. Once ready, it enters the main loop running at ~60Hz, where it concurrently:
 
 1. **Reads sensors** — IMU, temperature, and moisture are polled on their own schedules.
-2. **Manages networking** — the dual-stack engine continuously monitors both Wi-Fi and BLE connections, switching or hunting as needed.
+2. **Manages networking** — the dual-stack engine monitors both Wi-Fi and BLE, switching automatically:
+   - Wi-Fi connected → BLE advertising is **paused** (saves power).
+   - Wi-Fi drops → BLE advertising starts **immediately** so the gateway can connect.
+   - While on BLE → Wi-Fi reconnect is retried every **5 seconds** in the background.
 3. **Transmits data** — every ~16ms a sensor payload CSV is dispatched to the active connection.
 4. **Drives the UI** — the OLED redraws at 4 FPS with live signal strength bars and the interactive menu system.
-5. **Handles buttons** — physical button presses drive menu navigation with haptic feedback.
+5. **Handles buttons** — edge-detected button presses drive menu navigation with haptic feedback.
 
 ---
 
