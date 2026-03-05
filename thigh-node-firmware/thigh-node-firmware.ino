@@ -121,29 +121,36 @@ void systemPrint(String msg) {
 }
 
 // Signal Strength Graphics
-void drawSignalBars(int startX, int startY, int strength, bool isWiFi) {
-  // Draw Icon String (W or B)
-  display.setCursor(startX, startY);
-  display.print(isWiFi ? "W " : "B ");
-  
-  if (strength < 0) { // Disconnected state
-    display.print("x");
+// Draws 4 Nokia-style ascending bars at startX, startY
+// strength: -1=disconnected, 1-4=bars filled
+void drawSignalBars(int startX, int startY, int strength) {
+  if (strength < 0) {
+    // Draw a clean pixel-art 'x' (5×5 area) to indicate no connection
+    int x = startX + 1;
+    int y = startY + 2;
+    display.drawPixel(x + 0, y + 0, SSD1306_WHITE);
+    display.drawPixel(x + 1, y + 1, SSD1306_WHITE);
+    display.drawPixel(x + 2, y + 2, SSD1306_WHITE);
+    display.drawPixel(x + 3, y + 3, SSD1306_WHITE);
+    display.drawPixel(x + 4, y + 4, SSD1306_WHITE);
+    display.drawPixel(x + 4, y + 0, SSD1306_WHITE);
+    display.drawPixel(x + 3, y + 1, SSD1306_WHITE);
+    display.drawPixel(x + 1, y + 3, SSD1306_WHITE);
+    display.drawPixel(x + 0, y + 4, SSD1306_WHITE);
     return;
   }
-  
-  // Draw Nokia-style ascending bars
-  // Max 4 bars. Each bar is 2px wide with 1px gap
+
+  // 4 bars, each 2px wide, 4px apart, heights: 2,4,6,8
   for (int i = 0; i < 4; i++) {
-    int barX = startX + 12 + (i * 3);
-    int barHeight = 2 + (i * 2); // Heights: 2, 4, 6, 8
-    int barY = startY + 8 - barHeight; 
-    
+    int barX = startX + (i * 4);
+    int barHeight = 2 + (i * 2);
+    int barY = startY + 8 - barHeight;
+
     if (i < strength) {
-      display.fillRect(barX, barY, 2, barHeight, SSD1306_WHITE); // Filled bar
+      display.fillRect(barX, barY, 2, barHeight, SSD1306_WHITE);
     } else {
-      // Empty outline: A 2px wide drawRect actually fills the entire 2px area 
-      // because left and right borders overlap. We use a base dot instead.
-      display.drawPixel(barX, startY + 7, SSD1306_WHITE);
+      // Empty slot: base dot only
+      display.drawPixel(barX,     startY + 7, SSD1306_WHITE);
       display.drawPixel(barX + 1, startY + 7, SSD1306_WHITE);
     }
   }
@@ -450,58 +457,57 @@ void handleButtons() {
 
   if (!isScreenAwake) return;
 
-  // UP Button List Scrolling
-  if (digitalRead(BTN_UP) == LOW) {
+  // --- Edge-detected UP button (fires once per physical press) ---
+  static bool prevUp = HIGH;
+  bool curUp = digitalRead(BTN_UP);
+  if (curUp == LOW && prevUp == HIGH) {
     triggerHaptic(30);
-    if (currentMenu == MENU_MAIN) mainMenuCursor = (mainMenuCursor - 1 + 4) % 4; // Now 4 items
-    else if (currentMenu == MENU_SENSOR_LIST) sensorMenuCursor = (sensorMenuCursor - 1 + 3) % 3;
-    else if (currentMenu == MENU_NETWORK) networkMenuCursor = (networkMenuCursor - 1 + 4) % 4; // Now 4 items
-    else if (currentMenu == MENU_SERIAL_MONITOR) {
-      // UP scrolls towards older entries
-      if (serialLogScroll < 15) serialLogScroll++;
-    }
-    delay(200); 
+    if      (currentMenu == MENU_MAIN)           mainMenuCursor = (mainMenuCursor - 1 + 4) % 4;
+    else if (currentMenu == MENU_SENSOR_LIST)    sensorMenuCursor = (sensorMenuCursor - 1 + 3) % 3;
+    else if (currentMenu == MENU_NETWORK)        networkMenuCursor = (networkMenuCursor - 1 + 4) % 4;
+    else if (currentMenu == MENU_SERIAL_MONITOR && serialLogScroll < 15) serialLogScroll++;
   }
-  
-  // DOWN Button List Scrolling
-  if (digitalRead(BTN_DOWN) == LOW) {
-    triggerHaptic(30);
-    if (currentMenu == MENU_MAIN) mainMenuCursor = (mainMenuCursor + 1) % 4; 
-    else if (currentMenu == MENU_SENSOR_LIST) sensorMenuCursor = (sensorMenuCursor + 1) % 3; 
-    else if (currentMenu == MENU_NETWORK) networkMenuCursor = (networkMenuCursor + 1) % 4;
-    else if (currentMenu == MENU_SERIAL_MONITOR) {
-      // DOWN scrolls back towards newest
-      if (serialLogScroll > 0) serialLogScroll--;
-    }
-    delay(200);
-  }
+  prevUp = curUp;
 
+  // --- Edge-detected DOWN button ---
+  static bool prevDown = HIGH;
+  bool curDown = digitalRead(BTN_DOWN);
+  if (curDown == LOW && prevDown == HIGH) {
+    triggerHaptic(30);
+    if      (currentMenu == MENU_MAIN)           mainMenuCursor = (mainMenuCursor + 1) % 4;
+    else if (currentMenu == MENU_SENSOR_LIST)    sensorMenuCursor = (sensorMenuCursor + 1) % 3;
+    else if (currentMenu == MENU_NETWORK)        networkMenuCursor = (networkMenuCursor + 1) % 4;
+    else if (currentMenu == MENU_SERIAL_MONITOR && serialLogScroll > 0) serialLogScroll--;
+  }
+  prevDown = curDown;
+
+  // --- ENTER: tap = select, hold 1s = back ---
   if (digitalRead(BTN_ENTER) == LOW) {
     if (btnEnterPressTime == 0) btnEnterPressTime = millis();
-    
-    // Hold to go back logic
-    if (millis() - btnEnterPressTime > 800 && !btnEnterHeld) {
+
+    if (millis() - btnEnterPressTime > 1000 && !btnEnterHeld) {
       btnEnterHeld = true;
       triggerHaptic(100);
-      
-      if (currentMenu == MENU_SENSOR_VIEW) currentMenu = MENU_SENSOR_LIST;
+
+      if      (currentMenu == MENU_SENSOR_VIEW)  currentMenu = MENU_SENSOR_LIST;
       else if (currentMenu == MENU_NETWORK_TEST) currentMenu = MENU_NETWORK;
-      else if (currentMenu == MENU_SENSOR_LIST || currentMenu == MENU_LOG || currentMenu == MENU_NETWORK || currentMenu == MENU_SERIAL_MONITOR) {
+      else if (currentMenu == MENU_SENSOR_LIST || currentMenu == MENU_LOG ||
+               currentMenu == MENU_NETWORK     || currentMenu == MENU_SERIAL_MONITOR) {
         currentMenu = MENU_MAIN;
-        serialLogScroll = 0; // Reset scroll when leaving
+        serialLogScroll = 0;
       }
       else if (currentMenu == MENU_MAIN) {
-        currentMenu = MENU_OFF; 
+        currentMenu = MENU_OFF;
         isScreenAwake = false;
       }
     }
   } else {
-    // Short press to select logic
+    // Released — if it was a short tap, select
     if (btnEnterPressTime > 0 && !btnEnterHeld) {
       triggerHaptic(50);
-      
+
       if (currentMenu == MENU_MAIN) {
-        if (mainMenuCursor == 0) currentMenu = MENU_SENSOR_LIST;
+        if      (mainMenuCursor == 0) currentMenu = MENU_SENSOR_LIST;
         else if (mainMenuCursor == 1) currentMenu = MENU_LOG;
         else if (mainMenuCursor == 2) currentMenu = MENU_NETWORK;
         else if (mainMenuCursor == 3) currentMenu = MENU_SERIAL_MONITOR;
@@ -510,23 +516,10 @@ void handleButtons() {
         currentMenu = MENU_SENSOR_VIEW;
       }
       else if (currentMenu == MENU_NETWORK) {
-        // Apply the highlighted network mode
-        if (networkMenuCursor == 0) { 
-          netMode = MODE_AUTO; 
-          usingWiFi = (WiFi.status() == WL_CONNECTED);
-          setLED(usingWiFi ? 0 : 0, usingWiFi ? 255 : 128, usingWiFi ? 0 : 255); 
-        } 
-        else if (networkMenuCursor == 1) { 
-          netMode = MODE_WIFI_ONLY; 
-          setLED(0, 255, 0); 
-        } 
-        else if (networkMenuCursor == 2) { 
-          netMode = MODE_BLE_ONLY; 
-          setLED(0, 128, 255); 
-        }
-        else if (networkMenuCursor == 3) {
-          currentMenu = MENU_NETWORK_TEST;
-        }
+        if      (networkMenuCursor == 0) { netMode = MODE_AUTO;      usingWiFi = (WiFi.status() == WL_CONNECTED); setLED(0, usingWiFi ? 255 : 128, usingWiFi ? 0 : 255); }
+        else if (networkMenuCursor == 1) { netMode = MODE_WIFI_ONLY; setLED(0, 255, 0); }
+        else if (networkMenuCursor == 2) { netMode = MODE_BLE_ONLY;  setLED(0, 128, 255); }
+        else if (networkMenuCursor == 3) { currentMenu = MENU_NETWORK_TEST; }
       }
     }
     btnEnterPressTime = 0;
@@ -559,131 +552,225 @@ void handleScreen() {
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0,0);
 
+  // ========================
+  // MAIN MENU
+  // ========================
   if (currentMenu == MENU_MAIN) {
     bool routeWiFi = (netMode == MODE_WIFI_ONLY) || (netMode == MODE_AUTO && usingWiFi);
-    
+
+    // Header — title left, signal indicators right
+    display.setTextSize(1);
+    display.setCursor(0, 0);
+    display.print("SoterCare");
+
+    // Wi-Fi indicator: "W" label at x=70, bars at x=77 (4 bars * 4px = 16px → ends at x=93)
+    display.setCursor(70, 0);
+    display.print("W");
+    drawSignalBars(77, 0, getWiFiStrengthLevel());
+
+    // BLE indicator: "B" label at x=97, bars at x=104 (ends at x=120)
+    display.setCursor(97, 0);
+    display.print("B");
+    drawSignalBars(104, 0, getBLEStrengthLevel());
+
+    // BLE mode badge overwrites center if on BLE only
     if (!routeWiFi && bleConnected) {
-      display.print("BLE Mode ");
-    } else {
-      display.print("SoterCare");
+      display.setCursor(36, 0);
+      display.print("[BT]");
     }
-    
-    // Draw Signal Strength in Top Right
-    // W bars at x=70, B bars at x=100
-    drawSignalBars(70, 0, getWiFiStrengthLevel(), true);
-    drawSignalBars(100, 0, getBLEStrengthLevel(), false);
-    
-    display.setCursor(0, 10);
-    display.println("--------------------");
-    
-    // Draw exactly 4 items simultaneously
+
+    // Divider
+    display.drawFastHLine(0, 9, 128, SSD1306_WHITE);
+
+    // Menu items — 4 items, each 12px tall from y=12
+    const char* items[] = {"Sensor Test", "Error Log", "Network Mode", "Monitor"};
     for (int i = 0; i < 4; i++) {
-      String linePrefix = (mainMenuCursor == i) ? "> " : "  ";
-      String itemName = "";
-      
-      if (i == 0) itemName = "Sensor Test";
-      else if (i == 1) itemName = "Error Log";
-      else if (i == 2) itemName = "Network Mode";
-      else if (i == 3) itemName = "Monitor";
-      
-      display.println(linePrefix + itemName);
+      int itemY = 12 + (i * 12);
+      if (mainMenuCursor == i) {
+        display.fillRect(0, itemY - 1, 128, 11, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+        display.setCursor(4, itemY);
+        display.print(items[i]);
+        display.setTextColor(SSD1306_WHITE);
+      } else {
+        display.setCursor(4, itemY);
+        display.print(items[i]);
+      }
     }
-  } 
-  
-  else if (currentMenu == MENU_SENSOR_LIST) {
-    display.println("--- SENSOR TEST ---");
-    display.println(sensorMenuCursor == 0 ? "> 1. IMU (MPU6050)" : "  1. IMU (MPU6050)");
-    display.println(sensorMenuCursor == 1 ? "> 2. MLX Temp" : "  2. MLX Temp");
-    display.println(sensorMenuCursor == 2 ? "> 3. Moisture" : "  3. Moisture");
-    
-    display.setCursor(0, 55);
-    display.print("[Hold ENTER to Back]");
   }
-  
+
+  // ========================
+  // SENSOR LIST
+  // ========================
+  else if (currentMenu == MENU_SENSOR_LIST) {
+    display.setCursor(0, 0);
+    display.print("  SENSOR TEST");
+    display.drawFastHLine(0, 9, 128, SSD1306_WHITE);
+
+    const char* sensors[] = {"IMU  (MPU6050)", "Temp (MLX)", "Moisture"};
+    for (int i = 0; i < 3; i++) {
+      int itemY = 13 + (i * 13);
+      if (sensorMenuCursor == i) {
+        display.fillRect(0, itemY - 1, 128, 11, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+        display.setCursor(4, itemY);
+        display.print(sensors[i]);
+        display.setTextColor(SSD1306_WHITE);
+      } else {
+        display.setCursor(4, itemY);
+        display.print(sensors[i]);
+      }
+    }
+
+    display.drawFastHLine(0, 55, 128, SSD1306_WHITE);
+    display.setCursor(10, 57);
+    display.print("Hold ENTER: Back");
+  }
+
+  // ========================
+  // SENSOR DATA VIEW
+  // ========================
   else if (currentMenu == MENU_SENSOR_VIEW) {
     if (sensorMenuCursor == 0) {
-      display.println("--- IMU DATA ---");
-      display.printf("AccX: %.2f\n", mpu.getAccX());
-      display.printf("AccY: %.2f\n", mpu.getAccY());
-      display.printf("AccZ: %.2f\n", mpu.getAccZ());
-    } 
+      display.setCursor(0, 0);
+      display.print("  IMU DATA");
+      display.drawFastHLine(0, 9, 128, SSD1306_WHITE);
+      display.setCursor(0, 13);
+      display.printf("AccX: %6.3f g\n", mpu.getAccX());
+      display.setCursor(0, 25);
+      display.printf("AccY: %6.3f g\n", mpu.getAccY());
+      display.setCursor(0, 37);
+      display.printf("AccZ: %6.3f g\n", mpu.getAccZ());
+    }
     else if (sensorMenuCursor == 1) {
       Wire.setClock(100000);
       float objTemp = mlx.readObjectTempC();
       float ambTemp = mlx.readAmbientTempC();
       Wire.setClock(400000);
-      display.println("--- TEMP DATA ---");
-      display.printf("Obj: %.2f C\n", objTemp);
-      display.printf("Amb: %.2f C\n", ambTemp);
+      display.setCursor(0, 0);
+      display.print("  TEMPERATURE");
+      display.drawFastHLine(0, 9, 128, SSD1306_WHITE);
+      display.setCursor(0, 13);
+      display.printf("Object : %5.2f C\n", objTemp);
+      display.setCursor(0, 25);
+      display.printf("Ambient: %5.2f C\n", ambTemp);
     }
     else if (sensorMenuCursor == 2) {
-      display.println("--- MOISTURE ---");
-      display.printf("Raw ADC: %d\n", currentRawMoisture);
-      display.printf("Moisture: %d %%\n", currentMoisturePercent);
+      display.setCursor(0, 0);
+      display.print("  MOISTURE");
+      display.drawFastHLine(0, 9, 128, SSD1306_WHITE);
+      display.setCursor(0, 13);
+      display.printf("Raw ADC : %4d\n", currentRawMoisture);
+      display.setCursor(0, 25);
+      display.printf("Level   : %3d %%\n", currentMoisturePercent);
+
+      // Draw a simple progress bar at y=42
+      int barWidth = map(currentMoisturePercent, 0, 100, 0, 120);
+      display.drawRect(4, 42, 120, 8, SSD1306_WHITE);
+      display.fillRect(4, 42, barWidth, 8, SSD1306_WHITE);
     }
-    display.setCursor(0, 55);
-    display.print("[Hold ENTER to Back]");
+
+    display.drawFastHLine(0, 55, 128, SSD1306_WHITE);
+    display.setCursor(10, 57);
+    display.print("Hold ENTER: Back");
   }
-  
+
+  // ========================
+  // ERROR LOG
+  // ========================
   else if (currentMenu == MENU_LOG) {
-    display.println("--- ERROR LOG ---");
+    display.setCursor(0, 0);
+    display.print("  ERROR LOG");
+    display.drawFastHLine(0, 9, 128, SSD1306_WHITE);
+
     bool hasErrors = false;
+    int lineY = 12;
     for (int i = 0; i < 5; i++) {
       if (errorLogs[i].timestamp > 0) {
         hasErrors = true;
         int secs = errorLogs[i].timestamp / 1000;
-        display.printf("[%02d:%02d] %s\n", secs/60, secs%60, errorLogs[i].message.c_str());
+        display.setCursor(0, lineY);
+        display.printf("%02d:%02d %s", secs / 60, secs % 60, errorLogs[i].message.c_str());
+        lineY += 10;
       }
     }
-    if (!hasErrors) display.println("\n  No Errors Logged.");
-    
-    display.print("[Hold ENTER to Back]");
-  } 
-  
-  else if (currentMenu == MENU_NETWORK) {
-    display.println("--- NETWORK MODE ---");
-    
-    // Draw dropdown list with active marker
-    display.print(networkMenuCursor == 0 ? "> " : "  ");
-    display.print(netMode == MODE_AUTO ? "[*] " : "[ ] ");
-    display.println("AUTO");
-    
-    display.print(networkMenuCursor == 1 ? "> " : "  ");
-    display.print(netMode == MODE_WIFI_ONLY ? "[*] " : "[ ] ");
-    display.println("WI-FI ONLY");
-    
-    display.print(networkMenuCursor == 2 ? "> " : "  ");
-    display.print(netMode == MODE_BLE_ONLY ? "[*] " : "[ ] ");
-    display.println("BLE ONLY");
-    
-    display.print(networkMenuCursor == 3 ? "> " : "  ");
-    display.println("Test Network");
-    
-    display.setCursor(0, 55);
-    display.print("[Hold ENTER to Back]");
-  }
-  
-  else if (currentMenu == MENU_NETWORK_TEST) {
-    display.println("--- NETWORK TEST ---");
-    if (WiFi.status() == WL_CONNECTED) {
-      display.println("Wi-Fi: CONNECTED");
-      display.print("IP: "); display.println(WiFi.localIP());
-      display.print("RSSI: "); display.print(WiFi.RSSI()); display.println(" dBm");
-      display.print("Gate: "); display.println(gatewayIP);
-    } else {
-      display.println("Wi-Fi: DISCONNECTED");
-      display.println("Check router/env.h");
+    if (!hasErrors) {
+      display.setCursor(18, 28);
+      display.print("No Errors Logged");
     }
-    
-    display.setCursor(0, 55);
-    display.print("[Hold ENTER to Back]");
+
+    display.drawFastHLine(0, 55, 128, SSD1306_WHITE);
+    display.setCursor(10, 57);
+    display.print("Hold ENTER: Back");
   }
-  
+
+  // ========================
+  // NETWORK MODE
+  // ========================
+  else if (currentMenu == MENU_NETWORK) {
+    display.setCursor(0, 0);
+    display.print("  NETWORK MODE");
+    display.drawFastHLine(0, 9, 128, SSD1306_WHITE);
+
+    const char* netItems[] = {"AUTO", "WI-FI ONLY", "BLE ONLY", "Test Network"};
+    bool activeState[] = {netMode == MODE_AUTO, netMode == MODE_WIFI_ONLY, netMode == MODE_BLE_ONLY, false};
+
+    for (int i = 0; i < 4; i++) {
+      int itemY = 12 + (i * 11);
+      if (networkMenuCursor == i) {
+        display.fillRect(0, itemY - 1, 128, 10, SSD1306_WHITE);
+        display.setTextColor(SSD1306_BLACK);
+        display.setCursor(4, itemY);
+        display.print(i < 3 && activeState[i] ? "* " : "  ");
+        display.print(netItems[i]);
+        display.setTextColor(SSD1306_WHITE);
+      } else {
+        display.setCursor(4, itemY);
+        display.print(i < 3 && activeState[i] ? "* " : "  ");
+        display.print(netItems[i]);
+      }
+    }
+  }
+
+  // ========================
+  // NETWORK TEST
+  // ========================
+  else if (currentMenu == MENU_NETWORK_TEST) {
+    display.setCursor(0, 0);
+    display.print("  NETWORK TEST");
+    display.drawFastHLine(0, 9, 128, SSD1306_WHITE);
+
+    if (WiFi.status() == WL_CONNECTED) {
+      display.setCursor(0, 12);
+      display.print("Status: CONNECTED");
+      display.setCursor(0, 23);
+      display.print("IP: "); display.print(WiFi.localIP());
+      display.setCursor(0, 34);
+      display.printf("RSSI:   %d dBm", WiFi.RSSI());
+      display.setCursor(0, 45);
+      display.print("GW: "); display.print(gatewayIP);
+    } else {
+      display.setCursor(14, 18);
+      display.print("DISCONNECTED");
+      display.setCursor(8, 32);
+      display.print("Check router or");
+      display.setCursor(20, 42);
+      display.print("env.h SSID");
+    }
+
+    display.drawFastHLine(0, 55, 128, SSD1306_WHITE);
+    display.setCursor(10, 57);
+    display.print("Hold ENTER: Back");
+  }
+
+  // ========================
+  // SERIAL MONITOR
+  // ========================
   else if (currentMenu == MENU_SERIAL_MONITOR) {
-    display.println("--- MONITOR ---");
-    
-    // Collect all non-empty logs in chronological order (oldest first)
-    // serialLogIndex points to the NEXT write slot (oldest surviving entry)
+    display.setCursor(0, 0);
+    display.print("  MONITOR");
+    display.drawFastHLine(0, 9, 128, SSD1306_WHITE);
+
     String orderedLogs[20];
     int logCount = 0;
     for (int i = 0; i < 20; i++) {
@@ -692,25 +779,25 @@ void handleScreen() {
         orderedLogs[logCount++] = serialLogs[idx];
       }
     }
-    
-    // Show 5 lines. Default: newest at the bottom (scroll=0).
-    // scroll>0 means show older entries. 
+
     const int LINES_PER_PAGE = 5;
-    
-    // The last visible line index in orderedLogs (before scrolling up)
-    // serialLogScroll=0 → show last 5; serialLogScroll=1 → shift one up, etc.
-    int lastVisible = logCount - 1 - serialLogScroll;
+    int lastVisible  = logCount - 1 - serialLogScroll;
     int firstVisible = lastVisible - LINES_PER_PAGE + 1;
-    
+
     for (int i = 0; i < LINES_PER_PAGE; i++) {
       int logIdx = firstVisible + i;
+      display.setCursor(0, 12 + (i * 10));
       if (logIdx >= 0 && logIdx < logCount) {
-        display.println(orderedLogs[logIdx].substring(0, 20));
-      } else {
-        display.println(""); // blank line padding at top
+        display.print(orderedLogs[logIdx].substring(0, 21));
       }
     }
+
+    // Scroll indicator on far right
+    if (serialLogScroll > 0) {
+      display.setCursor(116, 57);
+      display.print("/\\");
+    }
   }
-  
+
   display.display();
 }
