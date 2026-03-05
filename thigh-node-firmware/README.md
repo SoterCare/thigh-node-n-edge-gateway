@@ -112,20 +112,20 @@ The 128×64 OLED screen provides a fully interactive menu driven by three naviga
 
 ### Button Controls
 
-| Button                  | Action                                                             |
-| :---------------------- | :----------------------------------------------------------------- |
-| **Any** (screen off)    | Wakes the screen                                                   |
-| **UP / DOWN**           | Scrolls through menu items. Triggers haptic feedback on press      |
-| **ENTER** (tap)         | Selects the highlighted item / enters a submenu                    |
-| **ENTER** (hold >800ms) | Goes back to the previous menu. On Main Menu, turns the screen off |
-| **SOS**                 | Fires the vibration motor, logs "SOS Triggered" to Serial Monitor  |
+| Button                | Action                                                                                                      |
+| :-------------------- | :---------------------------------------------------------------------------------------------------------- |
+| **Any** (screen off)  | Wakes the screen                                                                                            |
+| **UP / DOWN**         | Scrolls through menu items. Edge-detected — registers exactly once per press. Haptic feedback on each press |
+| **ENTER** (tap < 1s)  | Selects the highlighted item / enters a submenu                                                             |
+| **ENTER** (hold ≥ 1s) | Goes back to the previous menu. On Main Menu, turns the screen off                                          |
+| **SOS**               | Fires the vibration motor, logs "SOS Triggered" to Serial Monitor                                           |
 
 ### Main Menu Header
 
 The top row of the Main Menu always shows:
 
-- **Left**: `SoterCare` (or `BLE Mode` if currently connected via BLE only)
-- **Right**: Nokia-style ascending signal bars for **W** (Wi-Fi RSSI) and **B** (BLE connected). Bars decrease as signal weakens. An `x` is shown if the interface is disconnected.
+- **Left**: `SoterCare`. When the device is operating on BLE only (no Wi-Fi), a `[BT]` badge appears in the header centre.
+- **Right**: Compact Nokia-style ascending signal bars — `W` for Wi-Fi RSSI, `B` for BLE. Bars dynamically decrease as signal weakens. When an interface has **no connection**, a pixel-art `×` cross is shown instead of bars.
 
 ### Full Menu Tree
 
@@ -162,7 +162,7 @@ A rolling 5-entry in-memory log captures anomalies: sensor init failures, I2C di
 
 ### On-Device Serial Monitor (`Main Menu → Monitor`)
 
-A 20-entry circular buffer stores all `systemPrint` messages (same messages you'd see on the USB serial console). Viewable directly on the OLED — scroll with UP/DOWN. Useful for field debugging without a laptop.
+A 20-entry circular buffer stores all `systemPrint` messages. Viewable on the OLED — **newest messages appear at the bottom** (like a real terminal). Press **UP** to scroll to older entries, **DOWN** to return to the latest. A `∧` indicator appears in the bottom-right corner when older entries are available above.
 
 ### OLED Hot-Plug Recovery
 
