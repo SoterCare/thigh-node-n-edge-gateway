@@ -68,7 +68,8 @@ enum MenuState {
   MENU_SENSOR_VIEW, 
   MENU_LOG, 
   MENU_NETWORK,
-  MENU_SERIAL_MONITOR
+  MENU_SERIAL_MONITOR,
+  MENU_NETWORK_TEST
 };
 MenuState currentMenu = MENU_MAIN; 
 
@@ -140,7 +141,10 @@ void drawSignalBars(int startX, int startY, int strength, bool isWiFi) {
     if (i < strength) {
       display.fillRect(barX, barY, 2, barHeight, SSD1306_WHITE); // Filled bar
     } else {
-      display.drawRect(barX, barY, 2, barHeight, SSD1306_WHITE); // Empty outline
+      // Empty outline: A 2px wide drawRect actually fills the entire 2px area 
+      // because left and right borders overlap. We use a base dot instead.
+      display.drawPixel(barX, startY + 7, SSD1306_WHITE);
+      display.drawPixel(barX + 1, startY + 7, SSD1306_WHITE);
     }
   }
 }
@@ -148,32 +152,18 @@ void drawSignalBars(int startX, int startY, int strength, bool isWiFi) {
 int getWiFiStrengthLevel() {
   if (WiFi.status() != WL_CONNECTED) return -1;
   long rssi = WiFi.RSSI();
-  if (rssi > -60) return 4;
-  else if (rssi > -70) return 3;
-  else if (rssi > -80) return 2;
+  // Adjusted thresholds for more aggressive animation drop-off
+  if (rssi >= -40) return 4;
+  else if (rssi >= -65) return 3;
+  else if (rssi >= -80) return 2;
   else return 1;
 }
 
 int getBLEStrengthLevel() {
-  if (!bleConnected) return -1;
-  return 4; // Fake max strength for connected BLE server
-}
-
-// Live Boot Screen Updater
-void printBootStatus(String step, String status) {
-  String fullMsg = step + status;
-  systemPrint(fullMsg);
-
-  if (oledInitialized) {
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0,0);
-    display.println("SoterCare Boot...");
-    display.println("-----------------");
-    display.println(fullMsg);
-    display.display();
-  }
+  if (!bleConnected || pServer == NULL) return -1;
+  // Since active client RSSI is not easily read on Kolban's BLE, animate placeholder
+  int visualLevel = 2 + (millis() % 3); 
+  return visualLevel;
 }
 
 // --- BLE Server Callbacks ---
@@ -191,6 +181,23 @@ class MyServerCallbacks: public BLEServerCallbacks {
       pServer->startAdvertising(); 
     }
 };
+
+// Live Boot Screen Updater
+void printBootStatus(String step, String status) {
+  String fullMsg = step + status;
+  systemPrint(fullMsg);
+
+  if (oledInitialized) {
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0,0);
+    display.println("SoterCare Boot...");
+    display.println("-----------------");
+    display.println(fullMsg);
+    display.display();
+  }
+}
 
 // --- Setup ---
 void setup() {
@@ -251,6 +258,7 @@ void setup() {
   // Init BLE
   printBootStatus("BLE Radio: ", "Starting...");
   BLEDevice::init("MedNode_BLE");
+  
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
   BLEService *pService = pServer->createService(SERVICE_UUID);
@@ -320,14 +328,20 @@ void sendData() {
   float temp = mlx.readObjectTempC();
   Wire.setClock(400000);
   
+  bool routeWiFi = (netMode == MODE_WIFI_ONLY) || (netMode == MODE_AUTO && usingWiFi);
+  
   String payload = String(mpu.getAccX()) + "," + 
                    String(mpu.getAccY()) + "," + 
                    String(mpu.getAccZ()) + "," + 
                    String(temp) + "," + 
-                   String(currentMoisturePercent) + "\n"; 
-
-  bool routeWiFi = (netMode == MODE_WIFI_ONLY) || (netMode == MODE_AUTO && usingWiFi);
-
+                   String(currentMoisturePercent);
+                   
+  // Only append signal strength when transmitting over Wi-Fi
+  if (routeWiFi) {
+    payload += "," + String(WiFi.RSSI());
+  }
+  
+  payload += "\n";
   if (routeWiFi) {
     udp.beginPacket(gatewayIP, udpPort);
     udp.print(payload);
@@ -441,9 +455,10 @@ void handleButtons() {
     triggerHaptic(30);
     if (currentMenu == MENU_MAIN) mainMenuCursor = (mainMenuCursor - 1 + 4) % 4; // Now 4 items
     else if (currentMenu == MENU_SENSOR_LIST) sensorMenuCursor = (sensorMenuCursor - 1 + 3) % 3;
-    else if (currentMenu == MENU_NETWORK) networkMenuCursor = (networkMenuCursor - 1 + 3) % 3;
+    else if (currentMenu == MENU_NETWORK) networkMenuCursor = (networkMenuCursor - 1 + 4) % 4; // Now 4 items
     else if (currentMenu == MENU_SERIAL_MONITOR) {
-      if (serialLogScroll > 0) serialLogScroll--;
+      // UP scrolls towards older entries
+      if (serialLogScroll < 15) serialLogScroll++;
     }
     delay(200); 
   }
@@ -453,9 +468,10 @@ void handleButtons() {
     triggerHaptic(30);
     if (currentMenu == MENU_MAIN) mainMenuCursor = (mainMenuCursor + 1) % 4; 
     else if (currentMenu == MENU_SENSOR_LIST) sensorMenuCursor = (sensorMenuCursor + 1) % 3; 
-    else if (currentMenu == MENU_NETWORK) networkMenuCursor = (networkMenuCursor + 1) % 3;
+    else if (currentMenu == MENU_NETWORK) networkMenuCursor = (networkMenuCursor + 1) % 4;
     else if (currentMenu == MENU_SERIAL_MONITOR) {
-      if (serialLogScroll < 20 - 5) serialLogScroll++; // Keep within 20 bounds, display 5 lines at a time
+      // DOWN scrolls back towards newest
+      if (serialLogScroll > 0) serialLogScroll--;
     }
     delay(200);
   }
@@ -469,6 +485,7 @@ void handleButtons() {
       triggerHaptic(100);
       
       if (currentMenu == MENU_SENSOR_VIEW) currentMenu = MENU_SENSOR_LIST;
+      else if (currentMenu == MENU_NETWORK_TEST) currentMenu = MENU_NETWORK;
       else if (currentMenu == MENU_SENSOR_LIST || currentMenu == MENU_LOG || currentMenu == MENU_NETWORK || currentMenu == MENU_SERIAL_MONITOR) {
         currentMenu = MENU_MAIN;
         serialLogScroll = 0; // Reset scroll when leaving
@@ -507,6 +524,9 @@ void handleButtons() {
           netMode = MODE_BLE_ONLY; 
           setLED(0, 128, 255); 
         }
+        else if (networkMenuCursor == 3) {
+          currentMenu = MENU_NETWORK_TEST;
+        }
       }
     }
     btnEnterPressTime = 0;
@@ -528,13 +548,25 @@ void handleScreen() {
 
   if (!isScreenAwake || currentMenu == MENU_OFF) return;
 
+  // Throttle screen redraws to 4FPS to allow continuous animations 
+  // without overwhelming the I2C bus while resting
+  static unsigned long lastScreenDraw = 0;
+  if (millis() - lastScreenDraw < 250) return;
+  lastScreenDraw = millis();
+
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0,0);
 
   if (currentMenu == MENU_MAIN) {
-    display.print("SoterCare");
+    bool routeWiFi = (netMode == MODE_WIFI_ONLY) || (netMode == MODE_AUTO && usingWiFi);
+    
+    if (!routeWiFi && bleConnected) {
+      display.print("BLE Mode ");
+    } else {
+      display.print("SoterCare");
+    }
     
     // Draw Signal Strength in Top Right
     // W bars at x=70, B bars at x=100
@@ -605,7 +637,6 @@ void handleScreen() {
     }
     if (!hasErrors) display.println("\n  No Errors Logged.");
     
-    display.setCursor(0, 55);
     display.print("[Hold ENTER to Back]");
   } 
   
@@ -625,29 +656,59 @@ void handleScreen() {
     display.print(netMode == MODE_BLE_ONLY ? "[*] " : "[ ] ");
     display.println("BLE ONLY");
     
+    display.print(networkMenuCursor == 3 ? "> " : "  ");
+    display.println("Test Network");
+    
+    display.setCursor(0, 55);
+    display.print("[Hold ENTER to Back]");
+  }
+  
+  else if (currentMenu == MENU_NETWORK_TEST) {
+    display.println("--- NETWORK TEST ---");
+    if (WiFi.status() == WL_CONNECTED) {
+      display.println("Wi-Fi: CONNECTED");
+      display.print("IP: "); display.println(WiFi.localIP());
+      display.print("RSSI: "); display.print(WiFi.RSSI()); display.println(" dBm");
+      display.print("Gate: "); display.println(gatewayIP);
+    } else {
+      display.println("Wi-Fi: DISCONNECTED");
+      display.println("Check router/env.h");
+    }
+    
     display.setCursor(0, 55);
     display.print("[Hold ENTER to Back]");
   }
   
   else if (currentMenu == MENU_SERIAL_MONITOR) {
     display.println("--- MONITOR ---");
-    // Sort array by time: print oldest to newest. 
-    // serialLogIndex points to the OLDEST entry (next to be overwritten).
-    int linesShown = 0;
     
+    // Collect all non-empty logs in chronological order (oldest first)
+    // serialLogIndex points to the NEXT write slot (oldest surviving entry)
+    String orderedLogs[20];
+    int logCount = 0;
     for (int i = 0; i < 20; i++) {
-        if (linesShown >= 6) break; // Out of vertical screen space
-        
-        int physicalIdx = (serialLogIndex + i) % 20;
-        
-        if (serialLogs[physicalIdx].length() > 0) {
-            // Only start drawing once we reach the scroll offset
-            if (i >= serialLogScroll) {
-                // Truncate strings to screen width (~20 chars max for text size 1)
-                display.println(serialLogs[physicalIdx].substring(0, 20)); 
-                linesShown++;
-            }
-        }
+      int idx = (serialLogIndex + i) % 20;
+      if (serialLogs[idx].length() > 0) {
+        orderedLogs[logCount++] = serialLogs[idx];
+      }
+    }
+    
+    // Show 5 lines. Default: newest at the bottom (scroll=0).
+    // scroll>0 means show older entries. 
+    const int LINES_PER_PAGE = 5;
+    
+    // The last visible line index in orderedLogs (before scrolling up)
+    // serialLogScroll=0 → show last 5; serialLogScroll=1 → shift one up, etc.
+    int lastVisible = logCount - 1 - serialLogScroll;
+    int firstVisible = lastVisible - LINES_PER_PAGE + 1;
+    
+    for (int i = 0; i < LINES_PER_PAGE; i++) {
+      int logIdx = firstVisible + i;
+      if (logIdx >= 0 && logIdx < logCount) {
+        display.println(orderedLogs[logIdx].substring(0, 20));
+      } else {
+        display.println(""); // blank line padding at top
+      }
     }
   }
   

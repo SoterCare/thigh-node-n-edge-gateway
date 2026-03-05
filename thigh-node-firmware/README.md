@@ -1,90 +1,183 @@
 # SoterCare Thigh Node Firmware
 
-This directory contains the firmware for the SoterCare Thigh Node, a wearable monitoring device built around an ESP32. It reads data from multiple sensors, coordinates local UI feedback, and streams data either over Wi-Fi (UDP) or Bluetooth Low Energy (BLE).
+The firmware for the **SoterCare Thigh Node** — a wearable health monitoring device built on an ESP32-S3. It reads data from multiple onboard sensors, displays a live interactive UI on an OLED screen, and streams sensor packets to the SoterCare Edge Gateway via Wi-Fi (UDP) or Bluetooth Low Energy (BLE), automatically managing which connection to use at any given time.
+
+---
 
 ## Initial Setup: Wi-Fi Credentials
 
-Before you can run or compile this firmware, you need to create a `env.h` file in the same directory as the `.ino` file to securely store your Wi-Fi credentials.
-
-This file is excluded from Git to prevent accidental leaks. Create the file and add the following contents:
+Wi-Fi credentials are **not** stored in the main firmware file. Before compiling, create a file named `env.h` in the same directory as the `.ino` file:
 
 ```cpp
 #ifndef ENV_H
 #define ENV_H
 
-// --- Wi-Fi Credentials ---
-const char* ssid = "YOUR_WIFI_SSID_HERE";
+const char* ssid     = "YOUR_WIFI_SSID_HERE";
 const char* password = "YOUR_WIFI_PASSWORD_HERE";
 
 #endif
 ```
 
-## Core Features and Functions
+> This file is listed in `.gitignore` and will **never be committed to Git**.
 
-- **Sensing:**
-  - **IMU:** MPU6050 (Accelerometer & Gyroscope)
-  - **Temperature:** MLX90614 (Ambient and Object Temperature)
-  - **Moisture:** Analog (percentage)
-- **Connectivity:**
-  - **Wi-Fi:** Sends sensor payloads via UDP to a local Gateway IP (`192.168.1.100:1234`).
-  - **BLE:** Uses the Nordic UART Service format to stream data as a fallback or forced mode.
-  - **Network Modes:** Auto (Wi-Fi preferred, fallback to BLE), Wi-Fi Only, BLE Only. You can switch modes via the device's OLED menu.
-- **Outputs:**
-  - 128x64 OLED Display (SSD1306)
-  - Single RGB NeoPixel (WS2812)
-  - Vibration Motor for haptic feedback
-- **Inputs:**
-  - UP, DOWN, ENTER (Menu navigation)
-  - SOS button for immediate alert logging
+---
+
+## How It Works
+
+On boot, the device initialises all hardware subsystems in sequence (OLED, Temp Sensor, IMU, BLE, Wi-Fi) and displays a live boot log on the OLED. Once ready, it enters the main loop running at ~60Hz, where it concurrently:
+
+1. **Reads sensors** — IMU, temperature, and moisture are polled on their own schedules.
+2. **Manages networking** — the dual-stack engine continuously monitors both Wi-Fi and BLE connections, switching or hunting as needed.
+3. **Transmits data** — every ~16ms a sensor payload CSV is dispatched to the active connection.
+4. **Drives the UI** — the OLED redraws at 4 FPS with live signal strength bars and the interactive menu system.
+5. **Handles buttons** — physical button presses drive menu navigation with haptic feedback.
+
+---
 
 ## Hardware Pinout
 
 | Component           | Pin(s)                               | Notes                      |
 | :------------------ | :----------------------------------- | :------------------------- |
 | **I2C Bus**         | SDA: 8, SCL: 9                       | OLED, IMU, Temp Sensor     |
-| **Moisture Sensor** | A0: 4                                | Analog read only           |
-| **Buttons**         | UP: 11, ENTER: 12, DOWN: 13, SOS: 14 | Configured as INPUT_PULLUP |
-| **Vibration Motor** | 10                                   | Haptic feedback            |
-| **RGB LED**         | 48                                   | NeoPixel                   |
+| **Moisture Sensor** | A0: 4                                | Analog, smoothed 500ms avg |
+| **Buttons**         | UP: 11, ENTER: 12, DOWN: 13, SOS: 14 | `INPUT_PULLUP`             |
+| **Vibration Motor** | 10                                   | Haptic feedback (PWM)      |
+| **RGB LED**         | 48                                   | WS2812 NeoPixel            |
 
-## How the User Interface (Buttons & Screen) Works
+---
 
-The node features an interactive OLED menu driven by three main navigation buttons. The screen automatically turns off after 60 seconds of inactivity to save power.
+## Sensors & Data
 
-### Button Controls
+### IMU — MPU6050
 
-- **Any Button (When screen is off):** Wakes up the screen.
-- **UP / DOWN:** Scrolls through lists and options. Haptic feedback is triggered on press.
-- **ENTER (Short Press):** Selects the highlighted item or enters a sub-menu.
-- **ENTER (Hold for >800ms):** Goes back to the previous menu. Holding it on the main menu turns the screen off manually.
-- **SOS Button:** Immediately triggers the vibration motor, logs "SOS Triggered" to the Serial Monitor, and wakes the screen.
+Reads X, Y, Z acceleration via I2C at 400kHz. Auto-calibrated on boot (device must be flat).
 
-### Menu Structure
+### Temperature — MLX90614
 
-1. **Main Menu** (Header features graphical "Nokia-style" ascending signal bars for Wi-Fi and BLE connections)
-   - **Sensor Test:** Live view of local sensors.
-     - _IMU (MPU6050):_ Live feed of X, Y, Z acceleration.
-     - _MLX Temp:_ Live feed of Object and Ambient temperature in Celsius.
-     - _Moisture:_ Live view of raw ADC value and calculated percentage.
-   - **Error Log:** Displays the 5 most recent system errors.
-   - **Network Mode:** Let you override connectivity. Switch between Auto, Wi-Fi Only, and BLE Only.
-   - **Monitor:** A built-in serial monitor that mirrors the last 20 `Serial.print` operations directly to the OLED. Useful for debugging without a PC connection. Use the UP/DOWN buttons to scroll through the log buffer.
+Reads Object (skin surface) and Ambient temperature.
+
+> I2C clock is dynamically switched to 100kHz for each MLX read, then restored to 400kHz. This is required as the MLX90614 is an SMBus device and **cannot operate at 400kHz**.
+
+### Moisture — Analog Sensor
+
+Reads a raw ADC value every 100ms and calculates a 5-sample running average (effective smoothing window: 500ms). Mapped to a 0–100% range. Only the analog (A0) output is used.
+
+---
+
+## Connectivity & Dual-Stack Networking
+
+### Payload Schemas
+
+| Mode  | CSV Format                                         |
+| :---- | :------------------------------------------------- |
+| Wi-Fi | `AccX,AccY,AccZ,ObjTempC,MoisturePercent,RSSI_dBm` |
+| BLE   | `AccX,AccY,AccZ,ObjTempC,MoisturePercent`          |
+
+### Dual-Stack AUTO Mode (Default)
+
+The device does not wait for a connection at boot. Instead, it fires a non-blocking `WiFi.begin()` and immediately starts advertising BLE simultaneously.
+
+The connection engine (`checkNetworkStability`) runs every cycle and enforces the following state machine:
+
+| State                           | Behaviour                                                                 |
+| :------------------------------ | :------------------------------------------------------------------------ |
+| No Wi-Fi, No BLE                | LED blinks alternating **Green ↔ Blue** every 500ms while hunting         |
+| BLE connects first              | LED turns **solid Blue**. Wi-Fi reconnect is silently attempted every 10s |
+| Wi-Fi connects (from BLE state) | Immediately switches to Wi-Fi. LED turns **solid Green**                  |
+| Wi-Fi is primary                | LED stays **solid Green**. BLE remains advertised as backup               |
+| Wi-Fi drops                     | Falls back to BLE if connected. Reconnect attempts continue every 10s     |
+
+All state transitions are printed to both the USB Serial Monitor and the on-device OLED Serial Monitor buffer.
+
+### Wi-Fi Only / BLE Only Modes
+
+Can be forced via the OLED **Network Mode** menu. In forced modes, the auto-reconnect hunting engine is suspended.
+
+---
 
 ## LED Indications
 
-A single RGB NeoPixel visually signifies the device's connection status:
+| Color                   | Meaning                                                  |
+| :---------------------- | :------------------------------------------------------- |
+| **Purple**              | Booting / Initializing                                   |
+| **Blinking Green+Blue** | Actively searching for any connection (Wi-Fi or BLE)     |
+| **Solid Green**         | Connected via Wi-Fi (primary)                            |
+| **Solid Blue**          | Connected via BLE only; background Wi-Fi hunt is running |
 
-- **Purple:** Booting up / Initializing.
-- **Green:** Connected to Wi-Fi successfully.
-- **Blue:** Wi-Fi setup failed or disconnected; operating in BLE mode.
+---
 
-## Debugging and Error Logging
+## OLED User Interface
 
-The firmware has several debugging mechanisms built in:
+The 128×64 OLED screen provides a fully interactive menu driven by three navigation buttons. The screen sleeps after **60 seconds of inactivity** and can be woken by pressing any button.
 
-1. **Boot Screen Logging:**
-   During a system boot, the OLED display works as a live CLI, showing the initialization status of subsystems (e.g., `IMU Sensor: OK`, `Wi-Fi: Connecting...`).
-2. **Over-Serial Logging:**
-   Connect the ESP32 over USB at a `115200` baud rate to see duplicate live boot status printed out.
-3. **On-Device Error Log:**
-   A rolling in-memory error logger records the past 5 anomalies (e.g., initialization failures, Wi-Fi dropouts). These can be directly viewed on the device by navigating to `Main Menu -> Error Log`. They denote the uptime timestamp and a short log message.
+### Button Controls
+
+| Button                  | Action                                                             |
+| :---------------------- | :----------------------------------------------------------------- |
+| **Any** (screen off)    | Wakes the screen                                                   |
+| **UP / DOWN**           | Scrolls through menu items. Triggers haptic feedback on press      |
+| **ENTER** (tap)         | Selects the highlighted item / enters a submenu                    |
+| **ENTER** (hold >800ms) | Goes back to the previous menu. On Main Menu, turns the screen off |
+| **SOS**                 | Fires the vibration motor, logs "SOS Triggered" to Serial Monitor  |
+
+### Main Menu Header
+
+The top row of the Main Menu always shows:
+
+- **Left**: `SoterCare` (or `BLE Mode` if currently connected via BLE only)
+- **Right**: Nokia-style ascending signal bars for **W** (Wi-Fi RSSI) and **B** (BLE connected). Bars decrease as signal weakens. An `x` is shown if the interface is disconnected.
+
+### Full Menu Tree
+
+```
+Main Menu
+├── Sensor Test
+│   ├── IMU (MPU6050)    — Live AccX, AccY, AccZ
+│   ├── MLX Temp         — Live Object & Ambient °C
+│   └── Moisture         — Raw ADC + Moisture %
+├── Error Log            — Last 5 system errors with uptime timestamps
+├── Network Mode
+│   ├── AUTO             — Dual-stack automatic mode (default)
+│   ├── WI-FI ONLY       — Forces Wi-Fi only
+│   ├── BLE ONLY         — Forces BLE only
+│   └── Test Network     — Live diagnostic: IP, RSSI dBm, Gateway IP, status
+└── Monitor              — On-device serial log viewer (last 20 messages, scrollable)
+```
+
+---
+
+## Debugging Features
+
+### Boot Screen
+
+During startup, the OLED shows a live CLI-style log of each subsystem being initialised (e.g., `IMU Calibrating: Done`, `Wi-Fi: Starting Discovery...`).
+
+### USB Serial Monitor
+
+Connect at **115200 baud**. All `systemPrint()` calls (boot status, BLE events, Wi-Fi events, SOS triggers) are mirrored here in real time.
+
+### On-Device Error Log (`Main Menu → Error Log`)
+
+A rolling 5-entry in-memory log captures anomalies: sensor init failures, I2C disconnects, Wi-Fi drops. Each entry includes an uptime timestamp (`MM:SS`).
+
+### On-Device Serial Monitor (`Main Menu → Monitor`)
+
+A 20-entry circular buffer stores all `systemPrint` messages (same messages you'd see on the USB serial console). Viewable directly on the OLED — scroll with UP/DOWN. Useful for field debugging without a laptop.
+
+### OLED Hot-Plug Recovery
+
+Every 2 seconds the firmware pings the OLED's I2C address. If the display was disconnected and is reconnected, it is automatically re-initialised without rebooting the device.
+
+---
+
+## Dependencies (Arduino Libraries)
+
+| Library              | Purpose                             |
+| :------------------- | :---------------------------------- |
+| `Wire`               | I2C bus                             |
+| `WiFi` / `WiFiUdp`   | Wi-Fi connectivity and UDP packets  |
+| `BLEDevice` / `BLE*` | Bluetooth Low Energy (Kolban/ESP32) |
+| `MPU6050_light`      | IMU sensor driver                   |
+| `Adafruit_MLX90614`  | Temperature sensor driver           |
+| `Adafruit_SSD1306`   | OLED display driver                 |
+| `Adafruit_NeoPixel`  | RGB LED driver                      |
