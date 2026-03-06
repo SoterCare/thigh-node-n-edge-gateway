@@ -73,25 +73,26 @@ def wifi_is_alive() -> bool:
 # ── Frame parser ──────────────────────────────────────────────────────────────
 def parse_frame(raw: str, source: str) -> dict | None:
     """
-    Wi-Fi (7 fields): AccX,AccY,AccZ,ObjTempC,MoisturePercent,RSSI_dBm,SOS
-    BLE   (7 fields): AccX,AccY,AccZ,ObjTempC,MoisturePercent,0,SOS
+    Wi-Fi (8 fields): AccX,AccY,AccZ,ObjTempC,AmbientTempC,MoisturePercent,RSSI_dBm,SOS
+    BLE   (8 fields): AccX,AccY,AccZ,ObjTempC,AmbientTempC,MoisturePercent,0,SOS
     """
     parts = raw.strip().split(",")
-    if len(parts) < 5:
+    if len(parts) < 6:
         return None
     try:
-        rssi = int(parts[5]) if len(parts) >= 6 and parts[5].strip() != '0' else None
-        sos  = int(parts[6]) if len(parts) >= 7 else 0
+        rssi = int(parts[6]) if len(parts) >= 7 and parts[6].strip() != '0' else None
+        sos  = int(parts[7]) if len(parts) >= 8 else 0
         return {
-            "accX":     float(parts[0]),
-            "accY":     float(parts[1]),
-            "accZ":     float(parts[2]),
-            "temp":     float(parts[3]),
-            "moisture": int(float(parts[4])),
-            "rssi":     rssi,
-            "sos":      sos,
-            "source":   source,
-            "ts":       time.time(),
+            "accX":        float(parts[0]),
+            "accY":        float(parts[1]),
+            "accZ":        float(parts[2]),
+            "temp":        float(parts[3]),  # Object (Patient)
+            "ambientTemp": float(parts[4]),  # Ambient (Room)
+            "moisture":    int(float(parts[5])),
+            "rssi":        rssi,
+            "sos":         sos,
+            "source":      source,
+            "ts":          time.time(),
         }
     except (ValueError, IndexError):
         return None
@@ -273,10 +274,11 @@ def pipeline_thread():
             "accY":      f"{ay:.4f}",
             "accZ":      f"{az:.4f}",
             "gTotal":    f"{g_total:.4f}",
-            "temp":      f"{frame['temp']:.2f}",
-            "moisture":  str(frame["moisture"]),
-            "rssi":      str(frame["rssi"]) if frame["rssi"] is not None else "N/A",
-            "sos":       str(frame.get("sos", 0)),   # SOS button flag
+            "temp":        f"{frame['temp']:.2f}",
+            "ambientTemp": f"{frame['ambientTemp']:.2f}",
+            "moisture":    str(frame["moisture"]),
+            "rssi":        str(frame["rssi"]) if frame["rssi"] is not None else "N/A",
+            "sos":       str(frame.get("sos", 0)),   # Help Call button flag
             "source":    frame["source"],
             "gaitLabel": gait_label,
             "fallAlert": str(fall_alert),

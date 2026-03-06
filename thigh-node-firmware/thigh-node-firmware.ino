@@ -55,8 +55,9 @@ bool oledInitialized = false;
 // Sensor State Tracking
 int currentRawMoisture = 0;
 int currentMoisturePercent = 0;
-float cachedTemp = 0.0;   // Updated every 500ms
-int   cachedRSSI = 0;     // Updated every 1s, avoids WiFi.RSSI() overhead per frame
+float cachedTemp = 0.0;          // Updated every 500ms (Object)
+float cachedAmbientTemp = 0.0;   // Updated every 500ms (Ambient)
+int   cachedRSSI = 0;            // Updated every 1s, avoids WiFi.RSSI() overhead per frame
 
 // Button Logic
 unsigned long btnEnterPressTime = 0;
@@ -337,6 +338,7 @@ void loop() {
     lastTempRead = millis();
     Wire.setClock(100000);
     cachedTemp = mlx.readObjectTempC();
+    cachedAmbientTemp = mlx.readAmbientTempC();
     Wire.setClock(400000);
     TRY_TRANSMIT();          // Catch up immediately after blocking call
   }
@@ -396,13 +398,13 @@ void sendData() {
   // Use stack char buffer — avoids Arduino String heap alloc (~2-3ms saved per call)
   char payload[90];
   if (routeWiFi) {
-    snprintf(payload, sizeof(payload), "%.4f,%.4f,%.4f,%.2f,%d,%d,%d\n",
+    snprintf(payload, sizeof(payload), "%.4f,%.4f,%.4f,%.2f,%.2f,%d,%d,%d\n",
              mpu.getAccX(), mpu.getAccY(), mpu.getAccZ(),
-             cachedTemp, currentMoisturePercent, cachedRSSI, sosFlag);
+             cachedTemp, cachedAmbientTemp, currentMoisturePercent, cachedRSSI, sosFlag);
   } else {
-    snprintf(payload, sizeof(payload), "%.4f,%.4f,%.4f,%.2f,%d,0,%d\n",
+    snprintf(payload, sizeof(payload), "%.4f,%.4f,%.4f,%.2f,%.2f,%d,0,%d\n",
              mpu.getAccX(), mpu.getAccY(), mpu.getAccZ(),
-             cachedTemp, currentMoisturePercent, sosFlag);
+             cachedTemp, cachedAmbientTemp, currentMoisturePercent, sosFlag);
   }
 
   if (routeWiFi) {
@@ -517,7 +519,7 @@ void handleButtons() {
     digitalWrite(MOTOR_PIN, HIGH);
     sosMotorUntil = millis() + 500;
     if (currentMenu == MENU_OFF) currentMenu = MENU_MAIN;
-    systemPrint("SOS Triggered");
+    systemPrint("Help Call Triggered");
     return;  // No delay — hot path continues
   }
 

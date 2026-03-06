@@ -4,6 +4,61 @@ import { io } from "socket.io-client";
 const SOCKET_URL = "http://localhost:5000";
 const MAX_EVENTS = 60;
 
+// Warm up the speech synthesis API so voice lists are ready immediately
+if ("speechSynthesis" in window) {
+  window.speechSynthesis.getVoices();
+}
+
+// ── Medical Audio Engine ───────────────────────────────────────────────────────
+let audioCtx = null;
+
+function playSiren() {
+  if (!audioCtx) return;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+
+  osc.type = "square";
+  osc.frequency.setValueAtTime(800, audioCtx.currentTime); // High pitch
+  osc.frequency.setValueAtTime(600, audioCtx.currentTime + 0.5); // Low pitch
+
+  // Make it loud but avoid clipping. Loops for 2 seconds.
+  gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+
+  osc.start();
+  osc.stop(audioCtx.currentTime + 2); // Play for 2 seconds
+}
+
+function speakEvent(text, priority = false) {
+  if (!("speechSynthesis" in window)) return;
+  // If high priority (Help Call/Fall), cancel whatever is currently speaking
+  if (priority) {
+    window.speechSynthesis.cancel();
+  }
+  const utterance = new SpeechSynthesisUtterance(text);
+
+  // Try to find a pleasant female voice loaded by the OS/Browser
+  const voices = window.speechSynthesis.getVoices();
+  const femaleVoice = voices.find((v) => {
+    const n = v.name.toLowerCase();
+    return (
+      n.includes("female") ||
+      n.includes("zira") ||
+      n.includes("samantha") ||
+      n.includes("siri")
+    );
+  });
+
+  if (femaleVoice) {
+    utterance.voice = femaleVoice;
+  }
+
+  utterance.pitch = 1.2; // Raise pitch slightly for a sweeter sound
+  utterance.rate = 1.0;
+  window.speechSynthesis.speak(utterance);
+}
+
 // ── SVG Icons ─────────────────────────────────────────────────────────────────
 const Icon = {
   Temp: () => (
@@ -376,7 +431,7 @@ export default function App() {
       hzRef.current = 0;
 
       const age = Date.now() - lastDataTime.current;
-      const nowOnline = lastDataTime.current > 0 && age < 5000;
+      const nowOnline = lastDataTime.current > 0 && age < 15000;
 
       setOnline(nowOnline);
 
@@ -386,12 +441,13 @@ export default function App() {
         setData(null);
         prevGait.current = "";
         prevSource.current = "";
+
         setEvents((p) =>
           [
             {
               type: "danger",
               title: "Thigh Node Offline",
-              detail: "No data received for 5 seconds",
+              detail: "No data received for 15 seconds",
               time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
             },
             ...p,
@@ -439,24 +495,42 @@ export default function App() {
       const tmp = parseFloat(d.temp);
       const now = Date.now();
 
-      // ── SOS Button (highest priority) ─────────────────────────────────────
+      // ── Help Call Button (highest priority) ───────────────────────────────
       if (d.sos === "1" || d.sos === 1) {
         addEvent({
           type: "danger",
-          title: "SOS Alert",
-          detail: "Patient pressed the SOS button",
+          title: "Help Call",
+          detail: "Patient pressed the Help Call button",
           time: t,
         });
-      }
 
+        // Initialize Audio Context just-in-time on first alert if missing
+        if (!audioCtx)
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === "suspended") audioCtx.resume();
+
+        playSiren();
+        speakEvent(
+          "Help Call. Patient has pressed the Help Call button.",
+          true,
+        );
+      }
       // ── Fall Detection ─────────────────────────────────────────────────────
       if (d.fallAlert === "1") {
         addEvent({
           type: "danger",
-          title: "Fall Detected",
+          title: "Fall Detection Triggered",
           detail: `G-total: ${parseFloat(d.gTotal ?? 0).toFixed(2)}g  ·  Temp: ${tmp.toFixed(1)} C`,
           time: t,
         });
+
+        // Initialize Audio Context just-in-time on first alert if missing
+        if (!audioCtx)
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === "suspended") audioCtx.resume();
+
+        playSiren();
+        speakEvent("Fall Detected. Please check patient immediately.", true);
       }
 
       // ── Moisture > 25% (60s cooldown per threshold cross) ─────────────────
@@ -468,9 +542,10 @@ export default function App() {
           addEvent({
             type: mst >= 50 ? "danger" : "warning",
             title: `Moisture ${lvl}: ${mst}%`,
-            detail: "Check sensor placement on thigh",
+            detail: "Please attend to the patient",
             time: t,
           });
+          speakEvent("Moisture detected. Please attend to the patient.");
         }
       } else {
         if (moistureAlertRef.current) moistureAlertRef.current = 0;
@@ -490,6 +565,7 @@ export default function App() {
                 : "Monitor closely",
             time: t,
           });
+          speakEvent(`Temperature alert. ${tmp.toFixed(1)} degrees celsius.`);
         }
       } else {
         if (tempAlertRef.current) tempAlertRef.current = 0;
@@ -527,13 +603,27 @@ export default function App() {
           detail: `G-total: ${parseFloat(d.gTotal ?? 0).toFixed(2)}g`,
           time: t,
         });
+
+        if (g === "Risky Movement") {
+          // Initialize Audio Context just-in-time on first alert if missing
+          if (!audioCtx)
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          if (audioCtx.state === "suspended") audioCtx.resume();
+
+          playSiren();
+          speakEvent(
+            "Risky movement detected. Please check patient immediately.",
+            true,
+          );
+        }
       }
     });
 
     return () => socket.disconnect();
   }, [addEvent]);
 
-  const temp = data ? parseFloat(data.temp).toFixed(1) : null;
+  const patientTemp = data ? parseFloat(data.temp).toFixed(1) : null;
+  const roomTemp = data ? parseFloat(data.ambientTemp).toFixed(1) : null;
   const moisture = data ? parseInt(data.moisture) : null;
   const dimmed = !online ? { opacity: 0.45, pointerEvents: "none" } : {};
 
@@ -567,7 +657,7 @@ export default function App() {
 
         <div className="topbar-center">
           <div className="topbar-title">SoterCare</div>
-          <div className="topbar-sub">Gait Monitoring Gateway</div>
+          <div className="topbar-sub">Wellness Simplified</div>
         </div>
 
         <div className="topbar-right">
@@ -584,16 +674,21 @@ export default function App() {
         <div className="left" style={dimmed}>
           <MetricCard
             icon={<Icon.Temp />}
-            value={temp}
-            unit={temp ? " °C" : ""}
+            value={patientTemp ? `${patientTemp}°C` : "—"}
             label={
               !online
                 ? "No Data"
-                : temp > 38
-                  ? "Elevated Temperature"
-                  : "Skin Temperature"
+                : patientTemp > 38.5
+                  ? "Elevated Temp"
+                  : "Patient Skin"
             }
             colorClass="amber"
+            extra={
+              online &&
+              roomTemp && (
+                <div className="room-temp-badge">Room: {roomTemp}°C</div>
+              )
+            }
           />
           <MoistureCard moisture={online ? moisture : null} />
           <GaitCard label={online ? data?.gaitLabel : null} />

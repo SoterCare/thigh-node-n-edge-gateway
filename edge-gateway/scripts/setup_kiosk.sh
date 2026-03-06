@@ -26,7 +26,7 @@ cat > "$AUTOSTART_DIR/sotercare-kiosk.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=SoterCare Kiosk
-Exec=bash -c "sleep 5 && chromium-browser --kiosk --disable-restore-session-state --disable-infobars --noerrdialogs --disable-session-crashed-bubble $DASHBOARD_URL"
+Exec=bash -c "sleep 5 && chromium-browser --kiosk --disable-restore-session-state --disable-infobars --noerrdialogs --disable-session-crashed-bubble --autoplay-policy=no-user-gesture-required $DASHBOARD_URL"
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true

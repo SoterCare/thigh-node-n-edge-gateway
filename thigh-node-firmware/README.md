@@ -39,13 +39,13 @@ On boot, the device initialises all hardware subsystems in sequence (OLED, Temp 
 
 ## Hardware Pinout
 
-| Component           | Pin(s)                               | Notes                      |
-| :------------------ | :----------------------------------- | :------------------------- |
-| **I2C Bus**         | SDA: 8, SCL: 9                       | OLED, IMU, Temp Sensor     |
-| **Moisture Sensor** | A0: 4                                | Analog, smoothed 500ms avg |
-| **Buttons**         | UP: 11, ENTER: 12, DOWN: 13, SOS: 14 | `INPUT_PULLUP`             |
-| **Vibration Motor** | 10                                   | Haptic feedback (PWM)      |
-| **RGB LED**         | 48                                   | WS2812 NeoPixel            |
+| Component           | Pin(s)                                     | Notes                      |
+| :------------------ | :----------------------------------------- | :------------------------- |
+| **I2C Bus**         | SDA: 8, SCL: 9                             | OLED, IMU, Temp Sensor     |
+| **Moisture Sensor** | A0: 4                                      | Analog, smoothed 500ms avg |
+| **Buttons**         | UP: 11, ENTER: 12, DOWN: 13, Help Call: 14 | `INPUT_PULLUP`             |
+| **Vibration Motor** | 10                                         | Haptic feedback (PWM)      |
+| **RGB LED**         | 48                                         | WS2812 NeoPixel            |
 
 ---
 
@@ -121,7 +121,7 @@ The 128×64 OLED screen provides a fully interactive menu driven by three naviga
 | **UP / DOWN**         | Scrolls through menu items. Edge-detected — registers exactly once per press. Haptic feedback on each press |
 | **ENTER** (tap < 1s)  | Selects the highlighted item / enters a submenu                                                             |
 | **ENTER** (hold ≥ 1s) | Goes back to the previous menu. On Main Menu, turns the screen off                                          |
-| **SOS**               | Fires the vibration motor, logs "SOS Triggered" to Serial Monitor                                           |
+| **Help Call**         | Fires the vibration motor, logs "Help Call Triggered" to Serial Monitor                                     |
 
 ### Main Menu Header
 
@@ -157,7 +157,7 @@ During startup, the OLED shows a live CLI-style log of each subsystem being init
 
 ### USB Serial Monitor
 
-Connect at **115200 baud**. All `systemPrint()` calls (boot status, BLE events, Wi-Fi events, SOS triggers) are mirrored here in real time.
+Connect at **115200 baud**. All `systemPrint()` calls (boot status, BLE events, Wi-Fi events, Help Call triggers) are mirrored here in real time.
 
 ### On-Device Error Log (`Main Menu → Error Log`)
 
