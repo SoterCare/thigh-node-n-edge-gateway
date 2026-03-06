@@ -62,6 +62,7 @@ int   cachedRSSI = 0;     // Updated every 1s, avoids WiFi.RSSI() overhead per f
 unsigned long btnEnterPressTime = 0;
 bool btnEnterHeld = false;
 volatile bool sosTriggered = false;  // Set by SOS button, cleared after next transmit
+unsigned long sosMotorUntil = 0;     // Non-blocking haptic: motor off after this time
 
 // --- Menu State Machine ---
 enum MenuState { 
@@ -314,9 +315,16 @@ static unsigned long lastNetCheck    = 0;  // Network stability: every 2s
 } while(0)
 
 void loop() {
+  // ── Non-blocking SOS motor off ─────────────────────────────────────────────
+  if (sosMotorUntil && millis() >= sosMotorUntil) {
+    digitalWrite(MOTOR_PIN, LOW);
+    sosMotorUntil = 0;
+  }
+
   // ── HOT PATH FIRST ─────────────────────────────────────────────────────────
   mpu.update();
   TRY_TRANSMIT();
+
 
   // ── Buttons (fast — no I2C) ────────────────────────────────────────────────
   handleButtons();
@@ -492,17 +500,25 @@ void checkOLEDConnection() {
 // --- Navigation & Wake Logic ---
 void handleButtons() {
   bool anyNavPressed = (digitalRead(BTN_UP) == LOW) || (digitalRead(BTN_DOWN) == LOW) || (digitalRead(BTN_ENTER) == LOW);
-  bool sosPressed = (digitalRead(BTN_SOS) == LOW);
 
-  if (sosPressed) {
+  // Edge-detect SOS: fire ONCE per physical press, 3s cooldown prevents hold-spam
+  static bool    prevSos     = HIGH;
+  static unsigned long lastSosTime = 0;
+  bool curSos = (digitalRead(BTN_SOS) == LOW);
+  bool sosEdge = (curSos == LOW && prevSos == HIGH);  // falling edge only
+  prevSos = curSos;
+
+  if (sosEdge && (millis() - lastSosTime > 3000)) {
+    lastSosTime   = millis();
     lastButtonPressTime = millis();
     isScreenAwake = true;
-    sosTriggered = true;  // Flag for next payload transmission
+    sosTriggered  = true;          // Flag for next payload — clears after one transmit
+    // Non-blocking 500ms haptic
+    digitalWrite(MOTOR_PIN, HIGH);
+    sosMotorUntil = millis() + 500;
     if (currentMenu == MENU_OFF) currentMenu = MENU_MAIN;
     systemPrint("SOS Triggered");
-    triggerHaptic(500);
-    delay(300);
-    return;
+    return;  // No delay — hot path continues
   }
 
   if (anyNavPressed) {

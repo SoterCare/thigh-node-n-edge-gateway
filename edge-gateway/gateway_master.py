@@ -21,6 +21,7 @@ import time
 
 import redis
 from bleak import BleakClient, BleakScanner
+from fall_detector import FallDetector
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 UDP_HOST        = "0.0.0.0"
@@ -33,8 +34,7 @@ REDIS_MAXLEN    = 1000
 
 RESAMPLE_DROP_N = 6        # Drop 1 in 6 → 60Hz → 50Hz
 BLE_TIMEOUT_S   = 2.5      # Seconds of UDP silence before BLE activates
-FALL_G_THRESHOLD = 0.15    # g
-FALL_DURATION_S  = 3.0
+# Fall detection constants moved to fall_detector.py
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model", "gait_model.eim")
 
@@ -202,11 +202,14 @@ async def ble_task():
             set_state("searching")
 
 
-# ── Pipeline Thread: Resample + AI + Redis ───────────────────────────────────
+# ── Pipeline Thread: IMU → FallDetector + GaitAI → Redis ────────────────────
 def pipeline_thread():
     r = redis.Redis(host="localhost", port=6379, decode_responses=True)
 
-    # Load Edge Impulse model (optional)
+    # ── Fall Detector (independent of gait AI) ────────────────────────────
+    fd = FallDetector()
+
+    # ── Gait AI: Edge Impulse model (optional) ────────────────────────────
     runner = None
     try:
         from edge_impulse_linux.runner import ImpulseRunner
@@ -215,6 +218,8 @@ def pipeline_thread():
         print(f"[AI] Model loaded: {info['project']['name']}")
     except Exception as e:
         print(f"[AI] Model unavailable ({e}). Gait = N/A")
+
+    imu_window = []
 
     while True:
         try:
@@ -232,22 +237,19 @@ def pipeline_thread():
         ax, ay, az = frame["accX"], frame["accY"], frame["accZ"]
         g_total = math.sqrt(ax**2 + ay**2 + az**2)
 
-        # Fall detection
-        fall_alert = 0
-        if g_total < FALL_G_THRESHOLD:
-            if fall_start is None:
-                fall_start = time.time()
-            elif not fall_alerted and time.time() - fall_start >= FALL_DURATION_S:
-                fall_alert = 1
-                fall_alerted = True
-                print("[ALERT] Fall detected!")
+        # ── Fall Detection (two-phase state machine in fall_detector.py) ──
+        # Runs on every raw frame, completely independent of gait AI.
+        fall_detected, fall_info = fd.update(g_total, frame["ts"])
+        fall_alert = 1 if fall_detected else 0
+        if fall_detected:
+            try:
                 subprocess.Popen(
                     ["espeak-ng", "Fall detected. Please check the patient."],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
-        else:
-            fall_start = None
-            fall_alerted = False
+            except FileNotFoundError:
+                # Ignore if espeak-ng is not installed (e.g. on Windows)
+                pass
 
         # AI inference
         gait_label = "N/A"
@@ -274,6 +276,7 @@ def pipeline_thread():
             "temp":      f"{frame['temp']:.2f}",
             "moisture":  str(frame["moisture"]),
             "rssi":      str(frame["rssi"]) if frame["rssi"] is not None else "N/A",
+            "sos":       str(frame.get("sos", 0)),   # SOS button flag
             "source":    frame["source"],
             "gaitLabel": gait_label,
             "fallAlert": str(fall_alert),
