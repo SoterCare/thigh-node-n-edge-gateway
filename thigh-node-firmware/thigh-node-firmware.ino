@@ -46,7 +46,7 @@ bool bleConnected = false;
 
 // --- System Variables ---
 unsigned long lastTransmission = 0;
-const int targetInterval = 16; // ~60Hz
+const unsigned long targetInterval = 17; // Target ~58Hz; ~3ms execution overhead lands at 52-55Hz actual
 unsigned long lastButtonPressTime = 0;
 bool isScreenAwake = true;
 bool usingWiFi = false;
@@ -55,10 +55,13 @@ bool oledInitialized = false;
 // Sensor State Tracking
 int currentRawMoisture = 0;
 int currentMoisturePercent = 0;
+float cachedTemp = 0.0;   // Updated every 500ms
+int   cachedRSSI = 0;     // Updated every 1s, avoids WiFi.RSSI() overhead per frame
 
 // Button Logic
 unsigned long btnEnterPressTime = 0;
 bool btnEnterHeld = false;
+volatile bool sosTriggered = false;  // Set by SOS button, cleared after next transmit
 
 // --- Menu State Machine ---
 enum MenuState { 
@@ -257,7 +260,13 @@ void setup() {
     delay(1000);
   } else {
     printBootStatus("IMU Calibrating: ", "Keep Flat!");
-    mpu.calcOffsets(true, true); 
+    mpu.calcOffsets(true, true);
+    // Set MPU sample rate divider to 0 — max internal rate (1kHz with DLPF, 8kHz without)
+    // This ensures the sensor register always has fresh data when mpu.update() reads it
+    Wire.beginTransmission(0x68);  // MPU I2C address
+    Wire.write(0x19);              // SMPLRT_DIV register
+    Wire.write(0);                 // Divider = 0 → maximum sample rate
+    Wire.endTransmission(true);
     printBootStatus("IMU Calibrating: ", "Done");
     delay(500);
   }
@@ -290,21 +299,62 @@ void setup() {
 unsigned long lastBlinkTime = 0;
 bool ledBlinkState = false;
 
-// --- Main Loop ---
+// --- Helper timers (all non-blocking) ---
+static unsigned long lastTempRead    = 0;  // MLX: every 500ms
+static unsigned long lastOLEDDraw    = 0;  // OLED: every 250ms (4 FPS)
+static unsigned long lastNetCheck    = 0;  // Network stability: every 2s
+
+// Inline helper: transmit if 20ms window has passed
+#define TRY_TRANSMIT() do { \
+  unsigned long _t = millis(); \
+  if (_t - lastTransmission >= targetInterval) { \
+    lastTransmission = _t; \
+    sendData(); \
+  } \
+} while(0)
+
 void loop() {
-  mpu.update(); 
+  // ── HOT PATH FIRST ─────────────────────────────────────────────────────────
+  mpu.update();
+  TRY_TRANSMIT();
+
+  // ── Buttons (fast — no I2C) ────────────────────────────────────────────────
+  handleButtons();
+
+  // ── Moisture poll (100ms internal gate, just analogRead) ──────────────────
   updateMoisture();
 
-  handleButtons();
-  handleScreen(); 
-  checkOLEDConnection();
-  
-  if (millis() - lastTransmission >= targetInterval) {
-    lastTransmission = millis();
-    sendData();
+  // ── MLX Temperature every 500ms (slow I2C — ~8ms) ─────────────────────────
+  if (millis() - lastTempRead >= 500) {
+    lastTempRead = millis();
+    Wire.setClock(100000);
+    cachedTemp = mlx.readObjectTempC();
+    Wire.setClock(400000);
+    TRY_TRANSMIT();          // Catch up immediately after blocking call
+  }
+
+  // ── OLED redraw every 250ms (~20ms blocking I2C DMA) ──────────────────────
+  if (millis() - lastOLEDDraw >= 250) {
+    lastOLEDDraw = millis();
+    handleScreen();
+    checkOLEDConnection();
+    TRY_TRANSMIT();          // Catch up immediately after blocking call
+  }
+
+  // ── Cache RSSI every 1s — WiFi.RSSI() has driver overhead ────────────────
+  static unsigned long lastRSSIRead = 0;
+  if (millis() - lastRSSIRead >= 1000) {
+    lastRSSIRead = millis();
+    if (usingWiFi) cachedRSSI = WiFi.RSSI();
+  }
+
+  // ── Network stability every 2s ─────────────────────────────────────────────
+  if (millis() - lastNetCheck >= 2000) {
+    lastNetCheck = millis();
     checkNetworkStability();
   }
 }
+
 
 // --- Data & Comms ---
 void updateMoisture() {
@@ -331,30 +381,28 @@ void updateMoisture() {
 }
 
 void sendData() {
-  Wire.setClock(100000);
-  float temp = mlx.readObjectTempC();
-  Wire.setClock(400000);
-  
   bool routeWiFi = (netMode == MODE_WIFI_ONLY) || (netMode == MODE_AUTO && usingWiFi);
-  
-  String payload = String(mpu.getAccX()) + "," + 
-                   String(mpu.getAccY()) + "," + 
-                   String(mpu.getAccZ()) + "," + 
-                   String(temp) + "," + 
-                   String(currentMoisturePercent);
-                   
-  // Only append signal strength when transmitting over Wi-Fi
+  int  sosFlag   = sosTriggered ? 1 : 0;
+  sosTriggered   = false;  // Clear immediately so it fires only once
+
+  // Use stack char buffer — avoids Arduino String heap alloc (~2-3ms saved per call)
+  char payload[90];
   if (routeWiFi) {
-    payload += "," + String(WiFi.RSSI());
+    snprintf(payload, sizeof(payload), "%.4f,%.4f,%.4f,%.2f,%d,%d,%d\n",
+             mpu.getAccX(), mpu.getAccY(), mpu.getAccZ(),
+             cachedTemp, currentMoisturePercent, cachedRSSI, sosFlag);
+  } else {
+    snprintf(payload, sizeof(payload), "%.4f,%.4f,%.4f,%.2f,%d,0,%d\n",
+             mpu.getAccX(), mpu.getAccY(), mpu.getAccZ(),
+             cachedTemp, currentMoisturePercent, sosFlag);
   }
-  
-  payload += "\n";
+
   if (routeWiFi) {
     udp.beginPacket(gatewayIP, udpPort);
-    udp.print(payload);
-    udp.endPacket(); 
+    udp.write((const uint8_t*)payload, strlen(payload));
+    udp.endPacket();
   } else if (bleConnected) {
-    pTxCharacteristic->setValue(payload.c_str());
+    pTxCharacteristic->setValue(payload);
     pTxCharacteristic->notify();
   }
 }
@@ -449,11 +497,12 @@ void handleButtons() {
   if (sosPressed) {
     lastButtonPressTime = millis();
     isScreenAwake = true;
+    sosTriggered = true;  // Flag for next payload transmission
     if (currentMenu == MENU_OFF) currentMenu = MENU_MAIN;
     systemPrint("SOS Triggered");
     triggerHaptic(500);
-    delay(500); 
-    return; 
+    delay(300);
+    return;
   }
 
   if (anyNavPressed) {

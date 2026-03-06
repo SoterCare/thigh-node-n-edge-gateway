@@ -39,11 +39,17 @@ FALL_DURATION_S  = 3.0
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model", "gait_model.eim")
 
 # ── Shared state (thread-safe, single process) ────────────────────────────────
-frame_q        = queue.Queue(maxsize=1000)  # All frames land here
-udp_last_seen  = 0.0         # Updated by UDP listener thread
-udp_ever_seen  = False       # True only after first real UDP packet
-connection_mode = "searching"  # "wifi" | "ble" | "searching"
+frame_q        = queue.Queue(maxsize=2000)
+udp_last_seen  = 0.0
+udp_ever_seen  = False
+connection_mode = "searching"
 _state_lock    = threading.Lock()
+
+# ── Hz diagnostic counters (thread-safe via lock) ─────────────────────────────
+_diag_lock      = threading.Lock()
+_udp_rx_count   = 0    # Frames received from firmware (UDP or BLE)
+_redis_wr_count = 0    # Frames actually written to Redis
+_drop_count     = 0    # Frames dropped by 20ms gate
 
 
 def set_state(mode: str, ts: float | None = None):
@@ -67,20 +73,23 @@ def wifi_is_alive() -> bool:
 # ── Frame parser ──────────────────────────────────────────────────────────────
 def parse_frame(raw: str, source: str) -> dict | None:
     """
-    Wi-Fi (6 fields): AccX,AccY,AccZ,ObjTempC,MoisturePercent,RSSI_dBm
-    BLE   (5 fields): AccX,AccY,AccZ,ObjTempC,MoisturePercent
+    Wi-Fi (7 fields): AccX,AccY,AccZ,ObjTempC,MoisturePercent,RSSI_dBm,SOS
+    BLE   (7 fields): AccX,AccY,AccZ,ObjTempC,MoisturePercent,0,SOS
     """
     parts = raw.strip().split(",")
     if len(parts) < 5:
         return None
     try:
+        rssi = int(parts[5]) if len(parts) >= 6 and parts[5].strip() != '0' else None
+        sos  = int(parts[6]) if len(parts) >= 7 else 0
         return {
             "accX":     float(parts[0]),
             "accY":     float(parts[1]),
             "accZ":     float(parts[2]),
             "temp":     float(parts[3]),
             "moisture": int(float(parts[4])),
-            "rssi":     int(parts[5]) if len(parts) >= 6 else None,
+            "rssi":     rssi,
+            "sos":      sos,
             "source":   source,
             "ts":       time.time(),
         }
@@ -92,8 +101,10 @@ def parse_frame(raw: str, source: str) -> dict | None:
 def udp_listener_thread():
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # Large receive buffer so the OS doesn't drop burst datagrams
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 256 * 1024)
     sock.bind((UDP_HOST, UDP_PORT))
-    sock.settimeout(1.0)
+    sock.settimeout(0.5)   # Short timeout keeps loop responsive
     print(f"[UDP] Listening on {UDP_HOST}:{UDP_PORT}")
 
     while True:
@@ -103,6 +114,9 @@ def udp_listener_thread():
             frame = parse_frame(raw, "wifi")
             if frame:
                 set_state("wifi", ts=time.time())
+                with _diag_lock:
+                    global _udp_rx_count
+                    _udp_rx_count += 1
                 try:
                     frame_q.put_nowait(frame)
                 except queue.Full:
@@ -202,21 +216,18 @@ def pipeline_thread():
     except Exception as e:
         print(f"[AI] Model unavailable ({e}). Gait = N/A")
 
-    sample_count = 0
-    fall_start: float | None = None
-    fall_alerted = False
-    imu_window = []
-
     while True:
         try:
-            frame = frame_q.get(timeout=1.0)
+            frame = frame_q.get(timeout=0.5)
         except queue.Empty:
             continue
 
-        # Resample: drop every Nth frame
-        sample_count += 1
-        if sample_count % RESAMPLE_DROP_N == 0:
-            continue
+        # No rate limiting — firmware is hardware-capped at ~50Hz.
+        # Just count and write every valid frame to Redis.
+        with _diag_lock:
+            global _redis_wr_count
+            _redis_wr_count += 1
+
 
         ax, ay, az = frame["accX"], frame["accY"], frame["accZ"]
         g_total = math.sqrt(ax**2 + ay**2 + az**2)
@@ -301,7 +312,25 @@ if __name__ == "__main__":
                 with _state_lock:
                     mode = connection_mode
                 q_size = frame_q.qsize()
-                print(f"[STATUS] Mode={mode.upper()}  Queue={q_size}")
+                # Snapshot and reset Hz counters
+                with _diag_lock:
+                    udp_hz  = _udp_rx_count  // 5
+                    pipe_hz = _redis_wr_count // 5
+                    drops   = _drop_count
+                    globals().update(_udp_rx_count=0, _redis_wr_count=0, _drop_count=0)
+                status = (
+                    f"[STATUS] Mode={mode.upper():10s}  "
+                    f"UDP_RX={udp_hz:3d}Hz  "
+                    f"Redis_WR={pipe_hz:3d}Hz  "
+                    f"Dropped={drops:4d}  "
+                    f"Queue={q_size}"
+                )
+                print(status)
+                # Warn if firmware is sending slow
+                if udp_hz < 40 and mode != 'searching':
+                    print(f"  [WARN] Firmware sending only {udp_hz}Hz — check firmware loop blocking")
+                if pipe_hz < 40 and udp_hz >= 40:
+                    print(f"  [WARN] Pipeline bottleneck: {udp_hz}Hz in, {pipe_hz}Hz to Redis")
 
         await asyncio.gather(ble, status_loop())
 
