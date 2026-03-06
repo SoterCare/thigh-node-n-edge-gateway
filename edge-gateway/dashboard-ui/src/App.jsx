@@ -8,8 +8,8 @@ const MAX_EVENTS = 60;
 const Icon = {
   Temp: () => (
     <svg
-      width="20"
-      height="20"
+      width="32"
+      height="32"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -22,8 +22,8 @@ const Icon = {
   ),
   Water: () => (
     <svg
-      width="20"
-      height="20"
+      width="32"
+      height="32"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -36,8 +36,8 @@ const Icon = {
   ),
   Activity: () => (
     <svg
-      width="20"
-      height="20"
+      width="32"
+      height="32"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -50,8 +50,8 @@ const Icon = {
   ),
   Wifi: () => (
     <svg
-      width="18"
-      height="18"
+      width="28"
+      height="28"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -67,8 +67,8 @@ const Icon = {
   ),
   Bluetooth: () => (
     <svg
-      width="18"
-      height="18"
+      width="28"
+      height="28"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -81,8 +81,8 @@ const Icon = {
   ),
   Alert: () => (
     <svg
-      width="16"
-      height="16"
+      width="24"
+      height="24"
       viewBox="0 0 24 24"
       fill="none"
       stroke="white"
@@ -97,8 +97,8 @@ const Icon = {
   ),
   Walk: () => (
     <svg
-      width="16"
-      height="16"
+      width="24"
+      height="24"
       viewBox="0 0 24 24"
       fill="none"
       stroke="white"
@@ -113,8 +113,8 @@ const Icon = {
   ),
   Link: () => (
     <svg
-      width="16"
-      height="16"
+      width="24"
+      height="24"
       viewBox="0 0 24 24"
       fill="none"
       stroke="white"
@@ -128,8 +128,8 @@ const Icon = {
   ),
   Info: () => (
     <svg
-      width="16"
-      height="16"
+      width="24"
+      height="24"
       viewBox="0 0 24 24"
       fill="none"
       stroke="white"
@@ -144,8 +144,8 @@ const Icon = {
   ),
   Check: () => (
     <svg
-      width="16"
-      height="16"
+      width="24"
+      height="24"
       viewBox="0 0 24 24"
       fill="none"
       stroke="white"
@@ -158,8 +158,8 @@ const Icon = {
   ),
   Search: () => (
     <svg
-      width="14"
-      height="14"
+      width="22"
+      height="22"
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
@@ -169,6 +169,21 @@ const Icon = {
     >
       <circle cx="11" cy="11" r="8" />
       <line x1="21" y1="21" x2="16.65" y2="16.65" />
+    </svg>
+  ),
+  Clock: () => (
+    <svg
+      width="32"
+      height="32"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
     </svg>
   ),
 };
@@ -238,6 +253,20 @@ function GaitCard({ label }) {
         <div className="mcard-label" style={{ marginTop: 6 }}>
           Gait Analysis
         </div>
+      </div>
+    </div>
+  );
+}
+
+function ClockCard({ time }) {
+  return (
+    <div className="mcard">
+      <div className="mcard-icon slate">
+        <Icon.Clock />
+      </div>
+      <div className="mcard-body">
+        <div className="clock-value">{time || "--:--:--"}</div>
+        <div className="mcard-label">Local Time</div>
       </div>
     </div>
   );
@@ -546,7 +575,6 @@ export default function App() {
             IMU {online ? hz : 0} Hz
           </div>
           <ConnChip source={online ? data?.source : null} />
-          <span className="topbar-clock">{clock}</span>
         </div>
       </div>
 
@@ -554,33 +582,22 @@ export default function App() {
       <div className="main">
         {/* Left — dimmed when offline */}
         <div className="left" style={dimmed}>
-          <div className="metric-row">
-            <MetricCard
-              icon={<Icon.Temp />}
-              value={temp}
-              unit={temp ? " °C" : ""}
-              label={
-                !online
-                  ? "No Data"
-                  : temp > 38
-                    ? "Elevated Temperature"
-                    : "Skin Temperature"
-              }
-              colorClass="amber"
-            />
-            <MoistureCard moisture={online ? moisture : null} />
-          </div>
-          <div className="metric-row">
-            <GaitCard label={online ? data?.gaitLabel : null} />
-            <MetricCard
-              icon={<Icon.Activity />}
-              value={
-                !online ? "—" : data?.fallAlert === "1" ? "FALL" : "Normal"
-              }
-              label="Fall Detection"
-              colorClass={data?.fallAlert === "1" ? "coral" : "teal"}
-            />
-          </div>
+          <MetricCard
+            icon={<Icon.Temp />}
+            value={temp}
+            unit={temp ? " °C" : ""}
+            label={
+              !online
+                ? "No Data"
+                : temp > 38
+                  ? "Elevated Temperature"
+                  : "Skin Temperature"
+            }
+            colorClass="amber"
+          />
+          <MoistureCard moisture={online ? moisture : null} />
+          <GaitCard label={online ? data?.gaitLabel : null} />
+          <ClockCard time={clock} />
         </div>
 
         {/* Right: Timeline */}
