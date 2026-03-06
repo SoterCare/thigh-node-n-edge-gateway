@@ -73,22 +73,25 @@ def wifi_is_alive() -> bool:
 # ── Frame parser ──────────────────────────────────────────────────────────────
 def parse_frame(raw: str, source: str) -> dict | None:
     """
-    Wi-Fi (8 fields): AccX,AccY,AccZ,ObjTempC,AmbientTempC,MoisturePercent,RSSI_dBm,SOS
-    BLE   (8 fields): AccX,AccY,AccZ,ObjTempC,AmbientTempC,MoisturePercent,0,SOS
+    Wi-Fi (11 fields): AccX,AccY,AccZ,GyroX,GyroY,GyroZ,ObjTemp,AmbTemp,Moist,RSSI,HelpCall
+    BLE   (11 fields): AccX,AccY,AccZ,GyroX,GyroY,GyroZ,ObjTemp,AmbTemp,Moist,0,HelpCall
     """
     parts = raw.strip().split(",")
-    if len(parts) < 6:
+    if len(parts) < 11:
         return None
     try:
-        rssi = int(parts[6]) if len(parts) >= 7 and parts[6].strip() != '0' else None
-        sos  = int(parts[7]) if len(parts) >= 8 else 0
+        rssi = int(parts[9]) if len(parts) >= 10 and parts[9].strip() != '0' else None
+        sos  = int(parts[10]) if len(parts) >= 11 else 0
         return {
             "accX":        float(parts[0]),
             "accY":        float(parts[1]),
             "accZ":        float(parts[2]),
-            "temp":        float(parts[3]),  # Object (Patient)
-            "ambientTemp": float(parts[4]),  # Ambient (Room)
-            "moisture":    int(float(parts[5])),
+            "gyroX":       float(parts[3]),
+            "gyroY":       float(parts[4]),
+            "gyroZ":       float(parts[5]),
+            "temp":        float(parts[6]),  # Object (Patient)
+            "ambientTemp": float(parts[7]),  # Ambient (Room)
+            "moisture":    int(float(parts[8])),
             "rssi":        rssi,
             "sos":         sos,
             "source":      source,

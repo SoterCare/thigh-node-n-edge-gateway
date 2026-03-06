@@ -395,15 +395,17 @@ void sendData() {
   int  sosFlag   = sosTriggered ? 1 : 0;
   sosTriggered   = false;  // Clear immediately so it fires only once
 
-  // Use stack char buffer — avoids Arduino String heap alloc (~2-3ms saved per call)
-  char payload[90];
+  // Use stack char buffer — accommodates 6-axis IMU + secondary sensors
+  char payload[128];
   if (routeWiFi) {
-    snprintf(payload, sizeof(payload), "%.4f,%.4f,%.4f,%.2f,%.2f,%d,%d,%d\n",
+    snprintf(payload, sizeof(payload), "%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%d\n",
              mpu.getAccX(), mpu.getAccY(), mpu.getAccZ(),
+             mpu.getGyroX(), mpu.getGyroY(), mpu.getGyroZ(),
              cachedTemp, cachedAmbientTemp, currentMoisturePercent, cachedRSSI, sosFlag);
   } else {
-    snprintf(payload, sizeof(payload), "%.4f,%.4f,%.4f,%.2f,%.2f,%d,0,%d\n",
+    snprintf(payload, sizeof(payload), "%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,0,%d\n",
              mpu.getAccX(), mpu.getAccY(), mpu.getAccZ(),
+             mpu.getGyroX(), mpu.getGyroY(), mpu.getGyroZ(),
              cachedTemp, cachedAmbientTemp, currentMoisturePercent, sosFlag);
   }
 
