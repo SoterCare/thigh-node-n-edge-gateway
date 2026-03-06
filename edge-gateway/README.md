@@ -8,10 +8,10 @@ Raspberry Pi 5 edge gateway for the SoterCare wearable health monitoring system.
 
 The ESP32-S3 Thigh Node uses a dual-stack strategy:
 
-| Thigh Node State | Transport                              | Gateway receives                                                |
-| ---------------- | -------------------------------------- | --------------------------------------------------------------- |
-| Wi-Fi connected  | UDP → **`<gateway-ip>:1234`** at ~60Hz | 6-field CSV: `AccX,AccY,AccZ,ObjTempC,MoisturePercent,RSSI_dBm` |
-| Wi-Fi lost       | BLE notify on `MedNode_BLE` at ~60Hz   | 5-field CSV: `AccX,AccY,AccZ,ObjTempC,MoisturePercent`          |
+| Thigh Node State | Transport                              | Gateway receives                                                       |
+| ---------------- | -------------------------------------- | ---------------------------------------------------------------------- |
+| Wi-Fi connected  | UDP → **`<gateway-ip>:1234`** at ~60Hz | 8-field CSV: `AccX,AccY,AccZ,ObjTempC,AmbientTempC,Moisture,%RSSI,SOS` |
+| Wi-Fi lost       | BLE notify on `MedNode_BLE` at ~60Hz   | 8-field CSV: `AccX,AccY,AccZ,ObjTempC,AmbientTempC,Moisture,0,SOS`     |
 
 > The firmware hardcodes the UDP destination IP. Update `gatewayIP` in `thigh-node-firmware.ino` line ~36 to match your gateway machine's IP before flashing.
 
@@ -174,9 +174,28 @@ pip install edge-impulse-linux
 bash scripts/tune_redis.sh
 ```
 
-### Kiosk Mode
+### Kiosk Mode (Audio Support)
+
+The dashboard uses high-priority medical audio alerts. To allow automated background playback on the Pi:
 
 ```bash
+# setup_kiosk.sh includes --autoplay-policy flag:
 bash scripts/setup_kiosk.sh
 sudo reboot
 ```
+
+---
+
+## Recent Dashboard Enhancements
+
+### 1. Medical Audio Alerts
+
+- **Siren System:** Triggers a 2s siren for high-gravity impacts (Falls), manual **Help Calls**, and **Risky Movement** gait detection.
+- **Female Voice Profile:** Uses a pleasant female voice (warmup routine included) with comfort-oriented phrasing.
+- **System Silence:** Routine status updates (Online/Offline) are silent to avoid alarm fatigue.
+
+### 2. Monitoring & UX
+
+- **Dual Temperature:** Real-time monitoring of both Patient Skin and Room Ambient temperatures.
+- **Activity Timeline Persistence:** Recent medical events are saved to `localStorage`. The log persists during browser refreshes (F5) but automatically clears on a fresh system boot (session-aware).
+- **Terminology:** "SOS" has been standardized to **"Help Call"** across the entire UI and backend.

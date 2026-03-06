@@ -71,10 +71,10 @@ Reads a raw ADC value every 100ms and calculates a 5-sample running average (eff
 
 ### Payload Schemas
 
-| Mode  | CSV Format                                         |
-| :---- | :------------------------------------------------- |
-| Wi-Fi | `AccX,AccY,AccZ,ObjTempC,MoisturePercent,RSSI_dBm` |
-| BLE   | `AccX,AccY,AccZ,ObjTempC,MoisturePercent`          |
+| Mode  | CSV Format                                                          |
+| :---- | :------------------------------------------------------------------ |
+| Wi-Fi | `AccX,AccY,AccZ,ObjTempC,AmbientTempC,MoisturePercent,RSSI_dBm,SOS` |
+| BLE   | `AccX,AccY,AccZ,ObjTempC,AmbientTempC,MoisturePercent,0,SOS`        |
 
 ### Dual-Stack AUTO Mode (Default)
 

@@ -403,7 +403,25 @@ function EventItem({ ev }) {
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
   const [data, setData] = useState(null);
-  const [events, setEvents] = useState([]);
+  const [events, setEvents] = useState(() => {
+    // If this is a fresh boot (no session key), clear persistent logs
+    if (!sessionStorage.getItem("sotercare_booted")) {
+      localStorage.removeItem("sotercare_events");
+      sessionStorage.setItem("sotercare_booted", "true");
+      return [];
+    }
+    const saved = localStorage.getItem("sotercare_events");
+    try {
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+
+  // Persist events to localStorage whenever they change
+  useEffect(() => {
+    localStorage.setItem("sotercare_events", JSON.stringify(events));
+  }, [events]);
   const [hz, setHz] = useState(0);
   const [clock, setClock] = useState("--:--:--");
   const [online, setOnline] = useState(false); // true = receiving data
@@ -565,7 +583,9 @@ export default function App() {
                 : "Monitor closely",
             time: t,
           });
-          speakEvent(`Temperature alert. ${tmp.toFixed(1)} degrees celsius.`);
+          speakEvent(
+            `High temperature detected. ${tmp.toFixed(1)} degrees celsius.`,
+          );
         }
       } else {
         if (tempAlertRef.current) tempAlertRef.current = 0;
