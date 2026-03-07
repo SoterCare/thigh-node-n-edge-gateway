@@ -258,17 +258,30 @@ def pipeline_thread():
         # AI inference
         gait_label = "N/A"
         if runner:
-            imu_window.append([ax, ay, az])
-            win = getattr(runner, "get_input_features_count", lambda: 150)() // 3
+            # Append all 6 axes for flexibility
+            gx, gy, gz = frame["gyroX"], frame["gyroY"], frame["gyroZ"]
+            imu_window.append([ax, ay, az, gx, gy, gz])
+            
+            # Auto-detect if model expects 3-axis or 6-axis
+            feat_count = getattr(runner, "get_input_features_count", lambda: 150)()
+            samples = 125 # Default 2.5s @ 50Hz
+            axes = 3
+            if feat_count >= 750: # Likely 6-axis (125 * 6)
+                axes = 6
+            
+            win = feat_count // axes
             if len(imu_window) >= win:
                 try:
-                    features = [v for s in imu_window[-win:] for v in s]
+                    # Filter window to match model axes (Acc only or Acc+Gyro)
+                    window_subset = [s[:axes] for s in imu_window[-win:]]
+                    features = [v for s in window_subset for v in s]
+                    
                     res = runner.classify({"features": features})
                     cls = res.get("result", {}).get("classification", {})
                     if cls:
                         gait_label = max(cls, key=cls.get)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[AI] Inference error: {e}")
                 imu_window = imu_window[-win:]
 
         # Write to Redis

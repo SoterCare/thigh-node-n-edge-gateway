@@ -32,10 +32,18 @@ function playSiren() {
 
 function speakEvent(text, priority = false) {
   if (!("speechSynthesis" in window)) return;
+
+  // Chrome bug workaround: sometimes speech synthesis gets stuck. Resuming helps.
+  if (window.speechSynthesis.paused) {
+    window.speechSynthesis.resume();
+  }
+
   // If high priority (Help Call/Fall), cancel whatever is currently speaking
   if (priority) {
     window.speechSynthesis.cancel();
   }
+
+  // If already speaking and not high priority, queue it (which browser does by default)
   const utterance = new SpeechSynthesisUtterance(text);
 
   // Try to find a pleasant female voice loaded by the OS/Browser
@@ -46,7 +54,8 @@ function speakEvent(text, priority = false) {
       n.includes("female") ||
       n.includes("zira") ||
       n.includes("samantha") ||
-      n.includes("siri")
+      n.includes("siri") ||
+      n.includes("google UK English Female")
     );
   });
 
@@ -54,8 +63,9 @@ function speakEvent(text, priority = false) {
     utterance.voice = femaleVoice;
   }
 
-  utterance.pitch = 1.2; // Raise pitch slightly for a sweeter sound
+  utterance.pitch = 1.1;
   utterance.rate = 1.0;
+  utterance.volume = 1.0;
   window.speechSynthesis.speak(utterance);
 }
 
@@ -388,20 +398,52 @@ function eventIconEl(type) {
 }
 
 function EventItem({ ev }) {
+  const isSys = ev.category === "system";
   return (
-    <div className={`ev-item ${ev.type}`}>
+    <div className={`ev-item ${ev.type} ${isSys ? "system" : ""}`}>
       <div className={`ev-icon ${ev.type}`}>{eventIconEl(ev.type)}</div>
       <div className="ev-body">
-        <div className="ev-title">{ev.title}</div>
-        {ev.detail && <div className="ev-detail">{ev.detail}</div>}
+        <div className="ev-title">
+          {ev.title}
+          {isSys && ev.detail && (
+            <span className="ev-detail-inline"> — {ev.detail}</span>
+          )}
+        </div>
+        {!isSys && ev.detail && <div className="ev-detail">{ev.detail}</div>}
       </div>
       <div className="ev-time">{ev.time}</div>
     </div>
   );
 }
 
+// ── Components ───────────────────────────────────────────────────────────────
+function BootScreen({ progress, step }) {
+  return (
+    <div className="boot-screen">
+      <div className="boot-content">
+        <div className="boot-logo">SoterCare</div>
+        <div className="boot-sub">Wellness Simplified</div>
+
+        <div className="boot-loader-container">
+          <div className="boot-loader-bar" style={{ width: `${progress}%` }} />
+          <div className="boot-loader-glow" style={{ left: `${progress}%` }} />
+        </div>
+
+        <div className="boot-status">
+          <span className="boot-step-text">{step}</span>
+          <span className="boot-percent">{Math.round(progress)}%</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
+  const [booting, setBooting] = useState(true);
+  const [bootProgress, setBootProgress] = useState(0);
+  const [bootStep, setBootStep] = useState("Initializing System...");
+
   const [data, setData] = useState(null);
   const [events, setEvents] = useState(() => {
     // If this is a fresh boot (no session key), clear persistent logs
@@ -422,17 +464,65 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("sotercare_events", JSON.stringify(events));
   }, [events]);
+
   const [hz, setHz] = useState(0);
   const [clock, setClock] = useState("--:--:--");
-  const [online, setOnline] = useState(false); // true = receiving data
+  const [online, setOnline] = useState(false); // true = receiving live data
+  const [gwConnected, setGwConnected] = useState(false);
+
+  // Refs for boot sequence without dependency loops
+  const gwRef = useRef(false);
+  const onlineRef = useRef(false);
+
+  useEffect(() => {
+    gwRef.current = gwConnected;
+  }, [gwConnected]);
+  useEffect(() => {
+    onlineRef.current = online;
+  }, [online]);
 
   const hzRef = useRef(0);
   const prevGait = useRef("");
   const prevSource = useRef("");
-  const lastDataTime = useRef(0); // epoch ms of last sensor_update
+  const lastDataTime = useRef(0); // epoch ms of last live sensor_update
   const wasOnline = useRef(false); // for offline transition event
   const moistureAlertRef = useRef(0); // timestamp of last moisture alert (cooldown)
   const tempAlertRef = useRef(0); // timestamp of last temp alert (cooldown)
+  const bootSuccess = useRef(false);
+
+  // Global Audio Unlocker for Speech Synthesis & Siren
+  useEffect(() => {
+    const unlockAudio = () => {
+      // Unlock Web Audio API
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      if (audioCtx.state === "suspended") {
+        audioCtx.resume();
+      }
+      // Unlock Speech Synthesis API
+      if ("speechSynthesis" in window) {
+        if (window.speechSynthesis.paused) {
+          window.speechSynthesis.resume();
+        }
+        window.speechSynthesis.cancel(); // clear stuck queue
+        const u = new SpeechSynthesisUtterance("Audio system unlocked");
+        u.volume = 0; // Silent
+        window.speechSynthesis.speak(u);
+      }
+      // Remove listeners after first interaction
+      window.removeEventListener("click", unlockAudio);
+      window.removeEventListener("touchend", unlockAudio);
+    };
+
+    window.addEventListener("click", unlockAudio);
+    window.addEventListener("touchend", unlockAudio);
+
+    return () => {
+      window.removeEventListener("click", unlockAudio);
+      window.removeEventListener("touchend", unlockAudio);
+    };
+  }, []);
 
   useEffect(() => {
     const id = setInterval(
@@ -449,23 +539,24 @@ export default function App() {
       hzRef.current = 0;
 
       const age = Date.now() - lastDataTime.current;
-      const nowOnline = lastDataTime.current > 0 && age < 15000;
+      const nowOnline = lastDataTime.current > 0 && age < 6000; // 6s offline timeout (tighter)
 
       setOnline(nowOnline);
 
       if (!nowOnline && wasOnline.current) {
         // Just went offline
         wasOnline.current = false;
-        setData(null);
+        setData((prev) => (prev ? { ...prev, active: false } : null));
         prevGait.current = "";
         prevSource.current = "";
 
         setEvents((p) =>
           [
             {
+              category: "system",
               type: "danger",
               title: "Thigh Node Offline",
-              detail: "No data received for 15 seconds",
+              detail: "Connection to the node was lost",
               time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
             },
             ...p,
@@ -478,6 +569,43 @@ export default function App() {
     return () => clearInterval(id);
   }, []); // no addEvent dependency — uses setEvents directly
 
+  // Fast & Reliable Boot Sequence
+  useEffect(() => {
+    if (!booting) return;
+
+    setBootProgress(30);
+    setBootStep("Connecting to Gateway...");
+
+    let timeout;
+    let interval = setInterval(() => {
+      if (gwRef.current) {
+        setBootProgress(60);
+        setBootStep("Gateway Linked...");
+
+        if (onlineRef.current) {
+          clearInterval(interval);
+          clearTimeout(timeout);
+          setBootProgress(100);
+          setBootStep("Thigh Node Online! Starting...");
+          setTimeout(() => setBooting(false), 800);
+        }
+      }
+    }, 150);
+
+    // Hard timeout: approx 2.5 seconds max
+    timeout = setTimeout(() => {
+      clearInterval(interval);
+      setBootProgress(100);
+      setBootStep("Thigh Node Offline. Starting...");
+      setTimeout(() => setBooting(false), 800);
+    }, 2500);
+
+    return () => {
+      clearInterval(interval);
+      clearTimeout(timeout);
+    };
+  }, [booting]); // Only runs once when booting starts
+
   const addEvent = useCallback(
     (ev) => setEvents((p) => [ev, ...p].slice(0, MAX_EVENTS)),
     [],
@@ -486,29 +614,40 @@ export default function App() {
   useEffect(() => {
     const socket = io(SOCKET_URL);
 
-    socket.on("connect", () =>
+    socket.on("connect", () => {
+      setGwConnected(true);
       addEvent({
+        category: "system",
         type: "success",
         title: "Gateway Connected",
         detail: "Dashboard WebSocket established",
         time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
-      }),
-    );
-    socket.on("disconnect", () =>
+      });
+    });
+    socket.on("disconnect", () => {
+      setGwConnected(false);
       addEvent({
+        category: "system",
         type: "warning",
         title: "Gateway Disconnected",
         detail: "WebSocket lost — reconnecting",
         time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
-      }),
-    );
+      });
+    });
 
     socket.on("sensor_update", (d) => {
-      hzRef.current++;
-      lastDataTime.current = Date.now();
       setData(d);
-
       const t = tsFmt(d.ts);
+
+      // Prevent Redis history replay from faking an online status
+      const packetAgeMs = Math.abs(Date.now() - parseFloat(d.ts) * 1000);
+      const isHistorical = packetAgeMs > 10000; // Older than 10s
+
+      if (!isHistorical) {
+        hzRef.current++;
+        lastDataTime.current = Date.now();
+      }
+
       const mst = parseInt(d.moisture);
       const tmp = parseFloat(d.temp);
       const now = Date.now();
@@ -516,6 +655,7 @@ export default function App() {
       // ── Help Call Button (highest priority) ───────────────────────────────
       if (d.sos === "1" || d.sos === 1) {
         addEvent({
+          category: "health",
           type: "danger",
           title: "Help Call",
           detail: "Patient pressed the Help Call button",
@@ -536,6 +676,7 @@ export default function App() {
       // ── Fall Detection ─────────────────────────────────────────────────────
       if (d.fallAlert === "1") {
         addEvent({
+          category: "health",
           type: "danger",
           title: "Fall Detection Triggered",
           detail: `G-total: ${parseFloat(d.gTotal ?? 0).toFixed(2)}g  ·  Temp: ${tmp.toFixed(1)} C`,
@@ -558,6 +699,7 @@ export default function App() {
           moistureAlertRef.current = now;
           const lvl = mst >= 75 ? "Critical" : mst >= 50 ? "High" : "Elevated";
           addEvent({
+            category: "health",
             type: mst >= 50 ? "danger" : "warning",
             title: `Moisture ${lvl}: ${mst}%`,
             detail: "Please attend to the patient",
@@ -575,6 +717,7 @@ export default function App() {
         if (!last || now - last > 120_000) {
           tempAlertRef.current = now;
           addEvent({
+            category: "health",
             type: tmp > 39.5 ? "danger" : "warning",
             title: `High Temperature: ${tmp.toFixed(1)} C`,
             detail:
@@ -591,33 +734,43 @@ export default function App() {
         if (tempAlertRef.current) tempAlertRef.current = 0;
       }
 
-      // ── Connection source change ───────────────────────────────────────────
-      if (!prevSource.current && d.source) {
-        // First packet after connect / reconnect from offline
-        const label =
-          d.source === "wifi" ? `Wi-Fi — RSSI: ${d.rssi} dBm` : "BLE";
-        addEvent({
-          type: "success",
-          title: "Thigh Node Online",
-          detail: `Connected via ${d.source === "wifi" ? "Wi-Fi" : "BLE"} · ${label}`,
-          time: t,
-        });
-      } else if (d.source !== prevSource.current && prevSource.current) {
-        const toWifi = d.source === "wifi";
-        addEvent({
-          type: toWifi ? "success" : "neutral",
-          title: toWifi ? "Reconnected via Wi-Fi" : "Switched to BLE Fallback",
-          detail: toWifi ? `RSSI: ${d.rssi} dBm` : "Wi-Fi signal lost",
-          time: t,
-        });
+      // ── Connection source change (Live data only) ────────────────────────
+      if (!isHistorical) {
+        if (!prevSource.current && d.source) {
+          if (!booting) {
+            const label =
+              d.source === "wifi" ? `Wi-Fi — RSSI: ${d.rssi} dBm` : "BLE";
+            addEvent({
+              category: "system",
+              type: "success",
+              title: "Thigh Node Online",
+              detail: `Connected via ${d.source === "wifi" ? "Wi-Fi" : "BLE"} · ${label}`,
+              time: t,
+            });
+          }
+        } else if (d.source !== prevSource.current && prevSource.current) {
+          const toWifi = d.source === "wifi";
+          addEvent({
+            category: "system",
+            type: toWifi ? "success" : "neutral",
+            title: toWifi
+              ? "Thigh Node Reconnected via Wi-Fi"
+              : "Thigh Node Switched to BLE",
+            detail: toWifi
+              ? `RSSI: ${d.rssi} dBm`
+              : "Wi-Fi signal lost",
+            time: t,
+          });
+        }
+        prevSource.current = d.source;
       }
-      prevSource.current = d.source;
 
       // ── Gait label change ─────────────────────────────────────────────────
       const g = d.gaitLabel && d.gaitLabel !== "N/A" ? d.gaitLabel : null;
       if (g && g !== prevGait.current) {
         prevGait.current = g;
         addEvent({
+          category: "health",
           type: "info",
           title: `Gait: ${g}`,
           detail: `G-total: ${parseFloat(d.gTotal ?? 0).toFixed(2)}g`,
@@ -646,6 +799,10 @@ export default function App() {
   const roomTemp = data ? parseFloat(data.ambientTemp).toFixed(1) : null;
   const moisture = data ? parseInt(data.moisture) : null;
   const dimmed = !online ? { opacity: 0.45, pointerEvents: "none" } : {};
+
+  if (booting) {
+    return <BootScreen progress={bootProgress} step={bootStep} />;
+  }
 
   return (
     <div style={{ width: 800, height: 480, overflow: "hidden" }}>
