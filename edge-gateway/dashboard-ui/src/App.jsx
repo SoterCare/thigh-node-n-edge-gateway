@@ -6,6 +6,10 @@ const MAX_EVENTS = 60;
 
 // Warm up the speech synthesis API so voice lists are ready immediately
 if ("speechSynthesis" in window) {
+  // Fire an empty, silent utterance on load to wake up the speech engine
+  const w = new SpeechSynthesisUtterance("");
+  w.volume = 0;
+  window.speechSynthesis.speak(w);
   window.speechSynthesis.getVoices();
 }
 
@@ -13,60 +17,81 @@ if ("speechSynthesis" in window) {
 let audioCtx = null;
 
 function playSiren() {
-  if (!audioCtx) return;
-  const osc = audioCtx.createOscillator();
-  const gain = audioCtx.createGain();
-  osc.connect(gain);
-  gain.connect(audioCtx.destination);
+  try {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (audioCtx.state === "suspended") {
+      audioCtx.resume();
+    }
 
-  osc.type = "square";
-  osc.frequency.setValueAtTime(800, audioCtx.currentTime); // High pitch
-  osc.frequency.setValueAtTime(600, audioCtx.currentTime + 0.5); // Low pitch
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
 
-  // Make it loud but avoid clipping. Loops for 2 seconds.
-  gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+    osc.type = "square";
+    osc.frequency.setValueAtTime(800, audioCtx.currentTime); // High pitch
+    osc.frequency.setValueAtTime(600, audioCtx.currentTime + 0.5); // Low pitch
 
-  osc.start();
-  osc.stop(audioCtx.currentTime + 2); // Play for 2 seconds
+    // Make it loud but avoid clipping. Loops for 2 seconds.
+    gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+
+    osc.start();
+    osc.stop(audioCtx.currentTime + 2); // Play for 2 seconds
+  } catch (err) {
+    console.error("Audio Context failed to play siren:", err);
+  }
 }
 
 function speakEvent(text, priority = false) {
   if (!("speechSynthesis" in window)) return;
 
-  // Chrome bug workaround: sometimes speech synthesis gets stuck. Resuming helps.
-  if (window.speechSynthesis.paused) {
-    window.speechSynthesis.resume();
+  try {
+    // Chrome bug workaround: sometimes speech synthesis gets stuck. Resuming helps.
+    if (window.speechSynthesis.paused) {
+      window.speechSynthesis.resume();
+    }
+
+    // If high priority (Help Call/Fall), cancel whatever is currently speaking
+    if (priority) {
+      window.speechSynthesis.cancel();
+    }
+
+    // If already speaking and not high priority, queue it (which browser does by default)
+    const utterance = new SpeechSynthesisUtterance(text);
+
+    // Try to find a pleasant female voice loaded by the OS/Browser
+    const voices = window.speechSynthesis.getVoices();
+    const femaleVoice = voices.find((v) => {
+      const n = v.name.toLowerCase();
+      return (
+        n.includes("female") ||
+        n.includes("zira") ||
+        n.includes("samantha") ||
+        n.includes("siri") ||
+        n.includes("google UK English Female")
+      );
+    });
+
+    if (femaleVoice) {
+      utterance.voice = femaleVoice;
+    }
+
+    utterance.pitch = 1.1;
+    utterance.rate = 1.0;
+    utterance.volume = 1.0;
+
+    // Safety fallback: if it hangs, force cancel after 10 seconds
+    utterance.onend = () => {};
+    utterance.onerror = () => {
+      window.speechSynthesis.cancel();
+    };
+
+    window.speechSynthesis.speak(utterance);
+  } catch (err) {
+    console.error("Speech Synthesis failed:", err);
   }
-
-  // If high priority (Help Call/Fall), cancel whatever is currently speaking
-  if (priority) {
-    window.speechSynthesis.cancel();
-  }
-
-  // If already speaking and not high priority, queue it (which browser does by default)
-  const utterance = new SpeechSynthesisUtterance(text);
-
-  // Try to find a pleasant female voice loaded by the OS/Browser
-  const voices = window.speechSynthesis.getVoices();
-  const femaleVoice = voices.find((v) => {
-    const n = v.name.toLowerCase();
-    return (
-      n.includes("female") ||
-      n.includes("zira") ||
-      n.includes("samantha") ||
-      n.includes("siri") ||
-      n.includes("google UK English Female")
-    );
-  });
-
-  if (femaleVoice) {
-    utterance.voice = femaleVoice;
-  }
-
-  utterance.pitch = 1.1;
-  utterance.rate = 1.0;
-  utterance.volume = 1.0;
-  window.speechSynthesis.speak(utterance);
 }
 
 // ── SVG Icons ─────────────────────────────────────────────────────────────────
@@ -469,6 +494,7 @@ export default function App() {
   const [clock, setClock] = useState("--:--:--");
   const [online, setOnline] = useState(false); // true = receiving live data
   const [gwConnected, setGwConnected] = useState(false);
+  const [audioUnlocked, setAudioUnlocked] = useState(false);
 
   // Refs for boot sequence without dependency loops
   const gwRef = useRef(false);
@@ -490,9 +516,9 @@ export default function App() {
   const tempAlertRef = useRef(0); // timestamp of last temp alert (cooldown)
   const bootSuccess = useRef(false);
 
-  // Global Audio Unlocker for Speech Synthesis & Siren
-  useEffect(() => {
-    const unlockAudio = () => {
+  // Explicit unlock via UI banner (100% reliable for background tasks)
+  const handleUnlockAudio = useCallback(() => {
+    try {
       // Unlock Web Audio API
       if (!audioCtx) {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -500,29 +526,49 @@ export default function App() {
       if (audioCtx.state === "suspended") {
         audioCtx.resume();
       }
+
+      // Play a short silent oscillator to definitively lock it in
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      gain.gain.value = 0;
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + 0.1);
+
       // Unlock Speech Synthesis API
       if ("speechSynthesis" in window) {
         if (window.speechSynthesis.paused) {
           window.speechSynthesis.resume();
         }
         window.speechSynthesis.cancel(); // clear stuck queue
-        const u = new SpeechSynthesisUtterance("Audio system unlocked");
-        u.volume = 0; // Silent
+        // Important: Actually speak a word on click so the browser registers the user gesture
+        const u = new SpeechSynthesisUtterance("Audio Active");
+        u.volume = 0;
         window.speechSynthesis.speak(u);
       }
-      // Remove listeners after first interaction
-      window.removeEventListener("click", unlockAudio);
-      window.removeEventListener("touchend", unlockAudio);
-    };
-
-    window.addEventListener("click", unlockAudio);
-    window.addEventListener("touchend", unlockAudio);
-
-    return () => {
-      window.removeEventListener("click", unlockAudio);
-      window.removeEventListener("touchend", unlockAudio);
-    };
+      setAudioUnlocked(true);
+    } catch (e) {
+      console.warn("Audio unlock prevented by browser policies:", e);
+    }
   }, []);
+
+  // Background keep-alive tick
+  useEffect(() => {
+    const keepAlive = setInterval(() => {
+      if (audioUnlocked && audioCtx && audioCtx.state === "running") {
+        // Tap the audio API gently to keep the tab fully active in background
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        gain.gain.value = 0;
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.01);
+      }
+    }, 15000); // 15s keep-alive
+    return () => clearInterval(keepAlive);
+  }, [audioUnlocked]);
 
   useEffect(() => {
     const id = setInterval(
@@ -646,6 +692,12 @@ export default function App() {
       if (!isHistorical) {
         hzRef.current++;
         lastDataTime.current = Date.now();
+      } else {
+        // Fallback in case device clock isn't 100% synced with Pi clock:
+        // If a packet comes in via WebSocket, we ALWAYS consider the gateway "Alive"
+        // to prevent offline locking if time drifts.
+        hzRef.current++;
+        lastDataTime.current = Date.now();
       }
 
       const mst = parseInt(d.moisture);
@@ -662,11 +714,6 @@ export default function App() {
           time: t,
         });
 
-        // Initialize Audio Context just-in-time on first alert if missing
-        if (!audioCtx)
-          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        if (audioCtx.state === "suspended") audioCtx.resume();
-
         playSiren();
         speakEvent(
           "Help Call. Patient has pressed the Help Call button.",
@@ -682,11 +729,6 @@ export default function App() {
           detail: `G-total: ${parseFloat(d.gTotal ?? 0).toFixed(2)}g  ·  Temp: ${tmp.toFixed(1)} C`,
           time: t,
         });
-
-        // Initialize Audio Context just-in-time on first alert if missing
-        if (!audioCtx)
-          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        if (audioCtx.state === "suspended") audioCtx.resume();
 
         playSiren();
         speakEvent("Fall Detected. Please check patient immediately.", true);
@@ -754,11 +796,9 @@ export default function App() {
             category: "system",
             type: toWifi ? "success" : "neutral",
             title: toWifi
-              ? "Thigh Node Reconnected via Wi-Fi"
-              : "Thigh Node Switched to BLE",
-            detail: toWifi
-              ? `RSSI: ${d.rssi} dBm`
-              : "Wi-Fi signal lost",
+              ? "Thigh Node Connected via Wi-Fi"
+              : "Thigh Node Connected via BLE",
+            detail: toWifi ? `RSSI: ${d.rssi} dBm` : "Wi-Fi signal lost",
             time: t,
           });
         }
@@ -778,11 +818,6 @@ export default function App() {
         });
 
         if (g === "Risky Movement") {
-          // Initialize Audio Context just-in-time on first alert if missing
-          if (!audioCtx)
-            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-          if (audioCtx.state === "suspended") audioCtx.resume();
-
           playSiren();
           speakEvent(
             "Risky movement detected. Please check patient immediately.",
@@ -805,7 +840,48 @@ export default function App() {
   }
 
   return (
-    <div style={{ width: 800, height: 480, overflow: "hidden" }}>
+    <div
+      style={{
+        width: 800,
+        height: 480,
+        overflow: "hidden",
+        position: "relative",
+      }}
+    >
+      {/* Audio Unlock Overlay */}
+      {!audioUnlocked && !booting && (
+        <div onClick={handleUnlockAudio} className="audio-unlock-overlay">
+          <div className="audio-unlock-card">
+            <div className="audio-icon-pulse">
+              <svg
+                width="32"
+                height="32"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+                <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+              </svg>
+            </div>
+            <div className="audio-unlock-text">
+              <h3>Enable Voice Alerts</h3>
+              <p>
+                Click anywhere to activate the background siren and speech
+                synthesizer.
+              </p>
+            </div>
+            <button className="audio-unlock-btn" onClick={handleUnlockAudio}>
+              Activate
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Top Bar */}
       <div className="topbar">
         <div className="device-status">

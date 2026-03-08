@@ -11,11 +11,11 @@ The ESP32-S3 Thigh Node uses a dual-stack strategy:
 | Thigh Node State | Transport                              | Gateway receives                                                       |
 | ---------------- | -------------------------------------- | ---------------------------------------------------------------------- |
 | Wi-Fi connected  | UDP → **`<gateway-ip>:1234`** at ~60Hz | 8-field CSV: `AccX,AccY,AccZ,ObjTempC,AmbientTempC,Moisture,%RSSI,SOS` |
-| Wi-Fi lost       | BLE notify on `MedNode_BLE` at ~60Hz   | 8-field CSV: `AccX,AccY,AccZ,ObjTempC,AmbientTempC,Moisture,0,SOS`     |
+| Wi-Fi lost       | BLE notify on `SoterCare_BLE` at ~60Hz | 8-field CSV: `AccX,AccY,AccZ,ObjTempC,AmbientTempC,Moisture,0,SOS`     |
 
 > The firmware hardcodes the UDP destination IP. Update `gatewayIP` in `thigh-node-firmware.ino` line ~36 to match your gateway machine's IP before flashing.
 
-- BLE Device Name: `MedNode_BLE`
+- BLE Device Name: `SoterCare_BLE`
 - BLE TX Characteristic: `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` (Nordic UART)
 - The node retries Wi-Fi every 5 seconds while on BLE fallback.
 - BLE advertising stops automatically when Wi-Fi is healthy.
@@ -28,7 +28,7 @@ The ESP32-S3 Thigh Node uses a dual-stack strategy:
 Thigh Node
    │
    ├── UDP :1234 ──────────────────────────────────┐
-   └── BLE (MedNode_BLE) ──────────────────────────┤
+   └── BLE (SoterCare_BLE) ──────────────────────────┤
                                                     ▼
                                           gateway_master.py
                                     (asyncio + threading, single process)
@@ -199,3 +199,8 @@ sudo reboot
 - **Dual Temperature:** Real-time monitoring of both Patient Skin and Room Ambient temperatures.
 - **Activity Timeline Persistence:** Recent medical events are saved to `localStorage`. The log persists during browser refreshes (F5) but automatically clears on a fresh system boot (session-aware).
 - **Terminology:** "SOS" has been standardized to **"Help Call"** across the entire UI and backend.
+
+### 3. Hardware Feedback & Connectivity
+
+- **Signal Zone Out Vibration:** The Thigh Node actively polls live Wi-Fi RSSI (signal strength) every 1 second. If the signal drops below `-80 dBm` (indicating the user is walking out of range), the on-board motor triggers a sharp 150ms vibration pulse every 3 seconds to warn the user, ceasing immediately once a strong connection is re-established.
+- **Native BLE RSSI:** The Gateway Python script and the firmware natively use `esp_gap_ble_api` callbacks to retrieve and display true BLE signal strength dynamically on the OLED menu and seamlessly inject it into the edge dashboard timeline.

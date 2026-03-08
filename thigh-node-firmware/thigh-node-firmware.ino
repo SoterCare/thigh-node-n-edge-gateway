@@ -48,6 +48,7 @@ unsigned long lastButtonPressTime = 0;
 bool isScreenAwake = true;
 bool usingWiFi = false;
 bool oledInitialized = false;
+bool oledPlugAndPlayActive = false; // By default, OLED is ignored to save I2C hangs
 
 // Sensor State Tracking
 int currentRawMoisture = 0;
@@ -226,15 +227,20 @@ void setup() {
   led.setBrightness(50);
   setLED(128, 0, 128); 
   
-  // Init OLED
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    systemPrint("OLED init failed");
-    oledInitialized = false;
+  // Init OLED (Passive Check only — won't hang if missing)
+  Wire.beginTransmission(0x3C);
+  if (Wire.endTransmission() == 0) {
+    if(display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+      oledInitialized = true;
+      oledPlugAndPlayActive = true;
+      systemPrint("OLED display detected and initialized.");
+    }
   } else {
-    oledInitialized = true;
+    systemPrint("OLED ignored (Plug-and-play ready).");
+    oledInitialized = false;
   }
 
-  printBootStatus("OLED Display: ", "OK");
+  printBootStatus("OLED Display: ", oledInitialized ? "OK" : "Stby");
   delay(500);
 
   // Init MLX90614
@@ -272,7 +278,7 @@ void setup() {
 
   // Init BLE
   printBootStatus("BLE Radio: ", "Starting...");
-  BLEDevice::init("MedNode_BLE");
+  BLEDevice::init("SoterCare_BLE");
   
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
@@ -344,15 +350,30 @@ void loop() {
   if (millis() - lastOLEDDraw >= 250) {
     lastOLEDDraw = millis();
     handleScreen();
-    checkOLEDConnection();
+    // Only automatically poll the OLED if it's currently supposed to be active
+    if (oledPlugAndPlayActive) {
+      checkOLEDConnection();
+    }
     TRY_TRANSMIT();          // Catch up immediately after blocking call
   }
 
   // ── Cache RSSI every 1s — WiFi.RSSI() has driver overhead ────────────────
   static unsigned long lastRSSIRead = 0;
+  static unsigned long lastLowSignalVib = 0;
   if (millis() - lastRSSIRead >= 1000) {
     lastRSSIRead = millis();
-    if (usingWiFi) cachedRSSI = WiFi.RSSI();
+    if (usingWiFi) {
+      cachedRSSI = WiFi.RSSI();
+      
+      // Prevent user walking out of range: Vibrate if signal drops below -80 dBm
+      if (cachedRSSI < -80) {
+        if (millis() - lastLowSignalVib >= 3000) { // Pulse every 3s
+          lastLowSignalVib = millis();
+          digitalWrite(MOTOR_PIN, HIGH);
+          sosMotorUntil = millis() + 150; // 150ms non-blocking pulse
+        }
+      }
+    }
   }
 
   // ── Network stability every 2s ─────────────────────────────────────────────
@@ -525,15 +546,42 @@ void handleButtons() {
   if (anyNavPressed) {
     lastButtonPressTime = millis(); 
 
+    // --- Plug & Play OLED Activation (Hold UP + DOWN) ---
+    if (digitalRead(BTN_UP) == LOW && digitalRead(BTN_DOWN) == LOW) {
+      if (!oledPlugAndPlayActive) {
+        systemPrint("OLED Activated natively.");
+        triggerHaptic(100);
+        Wire.beginTransmission(0x3C);
+        if (Wire.endTransmission() == 0) {
+          if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+            oledInitialized = true;
+            oledPlugAndPlayActive = true;
+            isScreenAwake = true;
+            currentMenu = MENU_MAIN;
+            // Debounce keys
+            while(digitalRead(BTN_UP) == LOW || digitalRead(BTN_DOWN) == LOW) { delay(10); }
+            return;
+          }
+        } else {
+          systemPrint("OLED not found on I2C.");
+          // Debounce keys
+          while(digitalRead(BTN_UP) == LOW || digitalRead(BTN_DOWN) == LOW) { delay(10); }
+        }
+      }
+    }
+
     if (!isScreenAwake || currentMenu == MENU_OFF) {
-      isScreenAwake = true;
-      currentMenu = MENU_MAIN;
-      while(digitalRead(BTN_UP) == LOW || digitalRead(BTN_DOWN) == LOW || digitalRead(BTN_ENTER) == LOW) { delay(10); }
+      // Only wake up the software screen if the OLED is currently allowed to be active
+      if (oledPlugAndPlayActive) {
+        isScreenAwake = true;
+        currentMenu = MENU_MAIN;
+        while(digitalRead(BTN_UP) == LOW || digitalRead(BTN_DOWN) == LOW || digitalRead(BTN_ENTER) == LOW) { delay(10); }
+      }
       return; 
     }
   }
 
-  if (!isScreenAwake) return;
+  if (!isScreenAwake || !oledPlugAndPlayActive) return;
 
   // --- Edge-detected UP button (fires once per physical press) ---
   static bool prevUp = HIGH;
@@ -607,13 +655,19 @@ void handleButtons() {
 
 // --- Screen Rendering ---
 void handleScreen() {
-  if (!oledInitialized) return;
+  if (!oledInitialized || !oledPlugAndPlayActive) return;
 
   if (millis() - lastButtonPressTime > 60000) {
     isScreenAwake = false;
     currentMenu = MENU_OFF;
     display.clearDisplay();
     display.display();
+    
+    // OLED Plug & Play Timeout: Detach from I2C so it can be physically unplugged safely
+    systemPrint("OLED Timeout - Detaching from I2C.");
+    oledPlugAndPlayActive = false;
+    oledInitialized = false; 
+    
     return;
   }
 

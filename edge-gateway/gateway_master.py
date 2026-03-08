@@ -3,7 +3,7 @@
 SoterCare Edge Gateway — gateway_master.py
 Receives sensor data from the Thigh Node via:
   - UDP (primary):  0.0.0.0:1234  at ~60Hz
-  - BLE (fallback): MedNode_BLE, Nordic UART TX characteristic
+  - BLE (fallback): SoterCare_BLE, Nordic UART TX characteristic
 Resamples to 50Hz, runs Edge Impulse gait model, writes to Redis Stream.
 
 Architecture: single process, asyncio for BLE + threading for UDP + Redis.
@@ -26,7 +26,7 @@ from fall_detector import FallDetector
 # ── Configuration ─────────────────────────────────────────────────────────────
 UDP_HOST        = "0.0.0.0"
 UDP_PORT        = 1234
-BLE_DEVICE_NAME = "MedNode_BLE"
+BLE_DEVICE_NAME = "SoterCare_BLE"
 BLE_TX_UUID     = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
 REDIS_STREAM    = "sotercare_history"
@@ -134,7 +134,7 @@ def udp_listener_thread():
 # ── BLE Async Task ────────────────────────────────────────────────────────────
 async def ble_task():
     """
-    Monitors UDP silence. When UDP drops out, connects to MedNode_BLE.
+    Monitors UDP silence. When UDP drops out, connects to SoterCare_BLE.
     Disconnects and stands down as soon as UDP resumes.
     """
     global connection_mode
@@ -164,11 +164,11 @@ async def ble_task():
         if not ble_active:
             with _state_lock:
                 connection_mode = "searching"
-            print("[BLE] UDP silent. Scanning for MedNode_BLE...")
+            print(f"[BLE] UDP silent. Scanning for {BLE_DEVICE_NAME}...")
 
             device = await BleakScanner.find_device_by_name(BLE_DEVICE_NAME, timeout=10.0)
             if device is None:
-                print("[BLE] MedNode_BLE not found. Will retry...")
+                print(f"[BLE] {BLE_DEVICE_NAME} not found. Will retry...")
                 await asyncio.sleep(3.0)
                 continue
 

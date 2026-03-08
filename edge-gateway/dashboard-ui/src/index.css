@@ -652,3 +652,125 @@ body,
   color: var(--text-3);
   font-size: 12px;
 }
+
+/* ── Audio Unlock Overlay ────────────────────────────────────── */
+.audio-unlock-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(14, 18, 26, 0.6);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  animation: fadeIn 0.3s ease-out;
+}
+
+.audio-unlock-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 32px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  width: 380px;
+  box-shadow: var(--shadow-lg);
+  transform: translateY(10px);
+  animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards 0.1s;
+  opacity: 0;
+}
+
+.audio-icon-pulse {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  background: var(--teal-lt);
+  color: var(--teal-dk);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 20px;
+  box-shadow: 0 0 0 0 rgba(78, 205, 196, 0.4);
+  animation: pulse-ring 2s infinite cubic-bezier(0.215, 0.61, 0.355, 1);
+}
+
+.audio-unlock-text h3 {
+  margin: 0 0 8px 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-1);
+  letter-spacing: -0.3px;
+}
+
+.audio-unlock-text p {
+  margin: 0 0 28px 0;
+  font-size: 14px;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+
+.audio-unlock-btn {
+  background: var(--teal);
+  color: #ffffff;
+  border: none;
+  border-radius: 12px;
+  padding: 14px 0;
+  width: 100%;
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(78, 205, 196, 0.3);
+  transition: all 0.2s ease;
+  font-family: inherit;
+}
+
+.audio-unlock-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(78, 205, 196, 0.4);
+}
+
+.audio-unlock-btn:active {
+  transform: translateY(0);
+}
+
+@keyframes pulse-ring {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(78, 205, 196, 0.5);
+  }
+  70% {
+    transform: scale(1);
+    box-shadow: 0 0 0 15px rgba(78, 205, 196, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(78, 205, 196, 0);
+  }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
