@@ -19,9 +19,9 @@
 #define INTERVAL_MS  (1000 / FREQUENCY_HZ)
 
 // PASTE YOUR VALUES FROM THE CALIBRATION SCRIPT HERE:
-const float FACTORY_ACC_X = 0.07; 
+const float FACTORY_ACC_X = -0.01; 
 const float FACTORY_ACC_Y = 0.00;
-const float FACTORY_ACC_Z = 0.00;
+const float FACTORY_ACC_Z = 0.01;
 
 MPU6050 mySensor(Wire);
 BLEServer* pServer = NULL;

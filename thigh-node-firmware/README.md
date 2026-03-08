@@ -12,13 +12,16 @@ Wi-Fi credentials are **not** stored in the main firmware file. Before compiling
 #ifndef ENV_H
 #define ENV_H
 
+// --- Wi-Fi Credentials ---
 const char* ssid     = "YOUR_WIFI_SSID_HERE";
 const char* password = "YOUR_WIFI_PASSWORD_HERE";
 
+// --- Gateway Configuration ---
+const char* gatewayIP = "192.168.1.11";  // Change this to your PC/Pi IP address
+const int udpPort = 1234;
+
 #endif
 ```
-
-> **Before flashing:** Open `thigh-node-firmware.ino` line ~36 and set `gatewayIP` to the IP address of your gateway machine (run `ipconfig` on Windows or `hostname -I` on Linux to find it).
 
 ---
 

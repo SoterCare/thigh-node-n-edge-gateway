@@ -33,9 +33,6 @@ Adafruit_MLX90614 mlx = Adafruit_MLX90614();
 Adafruit_NeoPixel led(1, RGB_PIN, NEO_GRB + NEO_KHZ800);
 WiFiUDP udp;
 
-const char* gatewayIP = "192.168.1.11";
-const int udpPort = 1234;
-
 // --- BLE Nordic UART Service UUIDs ---
 #define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
