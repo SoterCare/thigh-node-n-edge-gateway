@@ -28,7 +28,9 @@ False-positive rejection strategy:
 """
 
 import time
+import math
 import logging
+import collections
 from enum import Enum, auto
 
 log = logging.getLogger("fall_detector")
@@ -71,29 +73,39 @@ class FallDetector:
         self._quiet_start   : float = 0.0   # when quiet period began
         self._quiet_active  : bool  = False  # currently in quiet window
 
+        # History and Kinematics
+        self._history       = collections.deque(maxlen=75) # 1.5s at 50Hz
+        self._pre_impact_vec= None
+        self._free_fall_seen= False
+
         # Cooldown
         self._last_alert_t  : float = 0.0
 
     # ── Public API ─────────────────────────────────────────────────────────────
-    def update(self, g_total: float, ts: float) -> tuple[bool, str]:
+    def update(self, ax: float, ay: float, az: float, ts: float) -> tuple[bool, str]:
         """
-        Feed one IMU frame.
+        Feed one IMU frame with 3-axis vectors.
 
         Parameters
         ----------
-        g_total : float — magnitude of acceleration vector in g-units
-        ts      : float — frame timestamp (time.time())
+        ax, ay, az : float — raw acceleration axes in g-units
+        ts         : float — frame timestamp (time.time())
 
         Returns
         -------
         (alert: bool, info: str)
           alert=True  once per confirmed fall (not on every quiet frame).
         """
+        g_total = math.sqrt(ax**2 + ay**2 + az**2)
+        
+        # Maintain history buffer for pre-impact analysis
+        self._history.append((ax, ay, az, g_total, ts))
+
         if self._state == FallState.IDLE:
-            return self._idle(g_total, ts)
+            return self._idle(ax, ay, az, g_total, ts)
 
         elif self._state == FallState.IMPACT_DETECTED:
-            return self._impact_phase(g_total, ts)
+            return self._impact_phase(ax, ay, az, g_total, ts)
 
         elif self._state == FallState.FALL_CONFIRMED:
             return self._cooldown_phase(ts)
@@ -101,7 +113,7 @@ class FallDetector:
         return False, ""
 
     # ── State handlers ─────────────────────────────────────────────────────────
-    def _idle(self, g: float, ts: float) -> tuple[bool, str]:
+    def _idle(self, ax: float, ay: float, az: float, g: float, ts: float) -> tuple[bool, str]:
         """IDLE: watch for a valid impact spike."""
         if IMPACT_THRESHOLD <= g <= IMPACT_MAX:
             self._state       = FallState.IMPACT_DETECTED
@@ -109,10 +121,27 @@ class FallDetector:
             self._impact_peak = g
             self._quiet_start = 0.0
             self._quiet_active = False
-            log.debug(f"[FallDetector] Impact detected: {g:.2f}g at ts={ts:.3f}")
+            
+            # Analyze pre-impact history
+            history_list = list(self._history)
+            
+            # 1. Free-fall check: any sample < 0.6g in history
+            self._free_fall_seen = any(item[3] < 0.6 for item in history_list)
+            
+            # 2. Compute pre-impact vector (average of oldest half of history)
+            if len(history_list) > 10:
+                base_samples = history_list[:len(history_list)//2]
+                avg_ax = sum(item[0] for item in base_samples) / len(base_samples)
+                avg_ay = sum(item[1] for item in base_samples) / len(base_samples)
+                avg_az = sum(item[2] for item in base_samples) / len(base_samples)
+                self._pre_impact_vec = (avg_ax, avg_ay, avg_az)
+            else:
+                self._pre_impact_vec = (ax, ay, az)
+                
+            log.debug(f"[FallDetector] Impact detected: {g:.2f}g. Free-fall seen: {self._free_fall_seen}")
         return False, ""
 
-    def _impact_phase(self, g: float, ts: float) -> tuple[bool, str]:
+    def _impact_phase(self, ax: float, ay: float, az: float, g: float, ts: float) -> tuple[bool, str]:
         """
         IMPACT DETECTED: check for post-impact quiet period.
         Two rejection paths back to IDLE:
@@ -150,7 +179,8 @@ class FallDetector:
                 self._quiet_start  = ts
             quiet_duration = ts - self._quiet_start
             if quiet_duration >= QUIET_DURATION:
-                return self._confirm_fall(ts, quiet_duration)
+                post_vec = (ax, ay, az)
+                return self._confirm_fall(ts, quiet_duration, post_vec)
         else:
             # G left the quiet band → reset quiet counter
             self._quiet_active = False
@@ -158,8 +188,8 @@ class FallDetector:
 
         return False, ""
 
-    def _confirm_fall(self, ts: float, quiet_dur: float) -> tuple[bool, str]:
-        """Transition to FALL_CONFIRMED and emit alert."""
+    def _confirm_fall(self, ts: float, quiet_dur: float, post_vec: tuple[float, float, float]) -> tuple[bool, str]:
+        """Verify posture and transition to FALL_CONFIRMED and emit alert."""
         # Respect cooldown from previous alert
         if ts - self._last_alert_t < FALL_COOLDOWN:
             remaining = FALL_COOLDOWN - (ts - self._last_alert_t)
@@ -167,11 +197,39 @@ class FallDetector:
             self._state = FallState.IDLE
             return False, ""
 
+        # ── Posture angle check ────────────────────────────────────────────
+        if self._pre_impact_vec:
+            v1 = self._pre_impact_vec
+            v2 = post_vec
+            mag1 = math.sqrt(v1[0]**2 + v1[1]**2 + v1[2]**2)
+            mag2 = math.sqrt(v2[0]**2 + v2[1]**2 + v2[2]**2)
+            if mag1 > 0 and mag2 > 0:
+                dot = v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
+                cos_theta = max(-1.0, min(1.0, dot / (mag1 * mag2)))
+                angle_deg = math.degrees(math.acos(cos_theta))
+            else:
+                angle_deg = 0.0
+        else:
+            angle_deg = 90.0 # fallback if no history
+            
+        # ── Rejection rules ────────────────────────────────────────────────
+        if angle_deg < 45.0:
+            log.debug(f"[FallDetector] Rejecting: Posture angle change ({angle_deg:.1f}°) < 45° (Not horizontal)")
+            self._state = FallState.IDLE
+            return False, ""
+            
+        if not self._free_fall_seen and self._impact_peak < 4.0:
+             log.debug(f"[FallDetector] Rejecting: No free-fall and moderate impact {self._impact_peak:.1f}g (Likely heavy sitting)")
+             self._state = FallState.IDLE
+             return False, ""
+
         self._state       = FallState.FALL_CONFIRMED
         self._last_alert_t = ts
         info = (
-            f"Impact {self._impact_peak:.2f}g → "
-            f"quiet {quiet_dur:.1f}s → FALL CONFIRMED"
+            f"Impact {self._impact_peak:.2f}g -> "
+            f"quiet {quiet_dur:.1f}s -> "
+            f"angle {angle_deg:.0f} deg -> "
+            f"FALL CONFIRMED"
         )
         log.warning(f"[FallDetector] {info}")
         print(f"[FALL] {info}")
