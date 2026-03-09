@@ -1665,27 +1665,37 @@ class SoterCareLocalStudio(ctk.CTk):
         
         if updated:
             # Write back all rows
-            with open(log_path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerows(rows)
+            try:
+                with open(log_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerows(rows)
+            except PermissionError:
+                self.log(f"WARNING: Could not update log file (Row Update). Is it open in Excel?")
+            except Exception as e:
+                self.log(f"Error updating log: {e}")
         else:
             # Append new row
-            with open(log_path, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    timestamp,
-                    record_id,
-                    self.current_participant['name'],
-                    self.current_participant['age'],
-                    self.current_participant['sex'],
-                    movement,
-                    int(duration_sec * 1000), # Duration
-                    self.session_config["frequency"],
-                    rel_path,
-                    "0", # Initial Redo Count
-                    "N/A" # Initial Cropped Duration
-                ])
-            self.log(f"Master log updated. ID: {record_id}")
+            try:
+                with open(log_path, 'a', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        timestamp,
+                        record_id,
+                        self.current_participant['name'],
+                        self.current_participant['age'],
+                        self.current_participant['sex'],
+                        movement,
+                        int(duration_sec * 1000), # Duration
+                        self.session_config["frequency"],
+                        rel_path,
+                        "0", # Initial Redo Count
+                        "N/A" # Initial Cropped Duration
+                    ])
+                self.log(f"Master log updated. ID: {record_id}")
+            except PermissionError:
+                self.log(f"WARNING: Could not write new row to log file. Is it open in Excel?")
+            except Exception as e:
+                self.log(f"Error writing to log: {e}")
     
     def update_recording_button_state(self, movement, duration_sec=None):
         """After recording completes, enable redo button and update main button to 'Record Next'"""
@@ -1828,9 +1838,14 @@ class SoterCareLocalStudio(ctk.CTk):
                 break
         
         if found:
-            with open(log_path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerows(rows)
+            try:
+                with open(log_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerows(rows)
+            except PermissionError:
+                self.log(f"WARNING: Could not update cropped time in log file. Is it open in Excel?")
+            except Exception as e:
+                self.log(f"Error updating log: {e}")
 
     def update_recording_row_label(self, movement, recording_num, duration_sec=None, text_override=None, color="#4CAF50", status_text="Complete"):
         """Helper to find and update the recording label with duration"""

@@ -21,8 +21,8 @@
 
 // PASTE YOUR VALUES FROM THE CALIBRATION SCRIPT HERE:
 const float FACTORY_ACC_X = -0.01; 
-const float FACTORY_ACC_Y = 0.00;
-const float FACTORY_ACC_Z = 0.01;
+const float FACTORY_ACC_Y = 0.04;
+const float FACTORY_ACC_Z = 0.03;
 
 MPU6050 mySensor(Wire);
 BLEServer* pServer = NULL;
