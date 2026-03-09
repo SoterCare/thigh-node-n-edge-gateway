@@ -805,7 +805,7 @@ export default function App() {
   }
 
   return (
-    <div style={{ width: 800, height: 480, overflow: "hidden" }}>
+    <div style={{ width: "100vw", height: "100vh", overflow: "hidden" }}>
       {/* Top Bar */}
       <div className="topbar">
         <div className="device-status">

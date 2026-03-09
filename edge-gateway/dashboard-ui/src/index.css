@@ -34,8 +34,8 @@
 html,
 body,
 #root {
-  width: 800px;
-  height: 480px;
+  width: 100vw;
+  height: 100vh;
   overflow: hidden;
   font-family: var(--font);
   background: var(--bg);
@@ -191,7 +191,7 @@ body,
   grid-template-columns: 320px 1fr;
   gap: 14px;
   padding: 14px 20px;
-  height: calc(480px - 52px);
+  height: calc(100vh - 52px);
 }
 
 /* ── LEFT ── */
@@ -368,8 +368,8 @@ body,
 .boot-screen {
   position: fixed;
   inset: 0;
-  width: 800px;
-  height: 480px;
+  width: 100vw;
+  height: 100vh;
   background: var(--bg);
   display: flex;
   align-items: center;
