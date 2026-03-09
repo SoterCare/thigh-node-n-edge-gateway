@@ -740,6 +740,15 @@ class SoterCareLocalStudio(ctk.CTk):
         )
         self.btn_save_crop.grid(row=2, column=0, columnspan=2, pady=10)
         
+        # Real-time duration label (below save button)
+        self.lbl_crop_duration = ctk.CTkLabel(
+            self.frame_crop_controls, 
+            text="Final Length: 0ms", 
+            font=("Arial", 12, "bold"), 
+            text_color="#00C853"
+        )
+        self.lbl_crop_duration.grid(row=3, column=0, columnspan=2, pady=(0, 5))
+        
         # Initial visibility update
         self.update_graph_visibility()
 
@@ -1117,7 +1126,7 @@ class SoterCareLocalStudio(ctk.CTk):
         if not os.path.exists(log_path):
             with open(log_path, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(["Timestamp", "Record_ID", "Name", "Age", "Sex", "Movement", "Duration_ms", "Freq_Hz", "File_Path", "Redo_Count"])
+                writer.writerow(["Timestamp", "Record_ID", "Name", "Age", "Sex", "Movement", "Duration_ms", "Freq_Hz", "File_Path", "Redo_Count", "Cropped_Duration_ms"])
             self.log(f"Created master log at {log_path}")
 
     # --- Config Import/Export ---
@@ -1129,9 +1138,9 @@ class SoterCareLocalStudio(ctk.CTk):
             
             if lbl:
                 try:
-                    dur_val = int(float(dur_str)) if dur_str else 5
+                    dur_val = float(dur_str) if dur_str else 5.0
                 except:
-                    dur_val = 5
+                    dur_val = 5.0
                 new_movements.append({"label": lbl, "duration_sec": dur_val})
         
         # Get frequency
@@ -1178,8 +1187,8 @@ class SoterCareLocalStudio(ctk.CTk):
                 dur_str = row["duration"].get().strip()
                 if lbl:
                     try:
-                        dur_val = int(float(dur_str))
-                    except: dur_val = 5
+                        dur_val = float(dur_str)
+                    except: dur_val = 5.0
                     temp_movements.append({"label": lbl, "duration_sec": dur_val})
             
             out_config = {
@@ -1550,6 +1559,14 @@ class SoterCareLocalStudio(ctk.CTk):
             ]
             final_values = values
 
+        duration_sec = 5
+        for m in self.session_config["movements"]:
+            if m["label"] == movement:
+                duration_sec = m.get("duration_sec", 5)
+                break
+                
+        actual_interval_ms = (duration_sec * 1000.0) / len(final_values) if len(final_values) > 0 else 1000.0 / self.session_config.get("frequency", 50)
+
         payload = {
             "protected": {"ver": "v1", "alg": "none", "iat": int(time.time())},
             "signature": "0",
@@ -1557,7 +1574,7 @@ class SoterCareLocalStudio(ctk.CTk):
                 "record_id": record_id,
                 "device_name": sanitized_name,
                 "device_type": "ESP32-S3",
-                "interval_ms": 1000.0 / self.session_config["frequency"],
+                "interval_ms": actual_interval_ms,
                 "sensors": final_sensors,
                 "values": final_values
             }
@@ -1634,6 +1651,14 @@ class SoterCareLocalStudio(ctk.CTk):
                 else:
                     rows[i].append(str(current_redos + 1))
                     
+                # Reset Cropped Duration because this is a new UN-cropped file now
+                cropped_duration_idx = 10
+                if len(rows[i]) > cropped_duration_idx:
+                    rows[i][cropped_duration_idx] = "N/A"
+                else:
+                    while len(rows[i]) <= cropped_duration_idx:
+                        rows[i].append("N/A")
+                    
                 updated = True
                 self.log(f"Updated log for Redo: {filename} (Cnt: {current_redos + 1})")
                 break
@@ -1657,7 +1682,8 @@ class SoterCareLocalStudio(ctk.CTk):
                     int(duration_sec * 1000), # Duration
                     self.session_config["frequency"],
                     rel_path,
-                    "0" # Initial Redo Count
+                    "0", # Initial Redo Count
+                    "N/A" # Initial Cropped Duration
                 ])
             self.log(f"Master log updated. ID: {record_id}")
     
@@ -1775,7 +1801,7 @@ class SoterCareLocalStudio(ctk.CTk):
         if recording_num - 1 < len(view_buttons):
             view_buttons[recording_num - 1].configure(state="disabled")
 
-    def update_csv_log_path(self, filename_search, new_path_val):
+    def update_csv_log_path(self, filename_search, new_path_val, cropped_duration_ms=None):
         log_path = os.path.join(self.root_folder, self.log_filename)
         if not os.path.exists(log_path): return
         
@@ -1785,13 +1811,19 @@ class SoterCareLocalStudio(ctk.CTk):
             rows = list(reader)
         
         file_path_idx = 8
+        cropped_duration_idx = 10
         found = False
         
-        # Filename search might tricky if rel_path used. 
-        # But we know filename is unique enough if we search endswith
         for i in range(1, len(rows)):
+            # Handle potential missing columns in old logs
+            while len(rows[i]) <= cropped_duration_idx:
+                rows[i].append("N/A")
+                
             if len(rows[i]) > file_path_idx and rows[i][file_path_idx].endswith(filename_search):
-                rows[i][file_path_idx] = new_path_val
+                if new_path_val is not None:
+                    rows[i][file_path_idx] = new_path_val
+                if cropped_duration_ms is not None:
+                    rows[i][cropped_duration_idx] = str(cropped_duration_ms)
                 found = True
                 break
         
@@ -1886,6 +1918,8 @@ class SoterCareLocalStudio(ctk.CTk):
             if not sensor_data:
                 self.log(f"No sensor data found in {filename}")
                 return
+                
+            self.current_viewing_interval_ms = data.get("payload", {}).get("interval_ms", 1000.0 / self.session_config.get("frequency", 50))
             
             # --- View Data (Stay in Recording Mode) ---
             
@@ -2106,61 +2140,43 @@ class SoterCareLocalStudio(ctk.CTk):
         if not self.full_recording_data: return
         
         total_samples = len(self.full_recording_data)
-        freq = self.session_config.get("frequency", 50)
+        interval_ms = getattr(self, "current_viewing_interval_ms", 1000.0 / self.session_config.get("frequency", 50))
         
-        # 10ms steps logic
-        # 10ms = 0.01s. Samples = 0.01 * freq.
-        # e.g. 50Hz -> 0.5 samples. Max(1, 0.5) = 1.
-        step_samples = max(1, int(freq * 0.01))
+        # Configure sliders to use percentages to ensure accurate cropping regardless of frequency
+        max_steps = 100
         
-        # Max steps possible
-        max_steps = total_samples // step_samples
-        
-        # Configure sliders
-        # We use a scaled range (0 to max_steps) to represent steps
         self.slider_crop_start.configure(from_=0, to=max_steps, number_of_steps=max_steps)
-        self.slider_crop_start.set(0) # Start at 0
+        self.slider_crop_start.set(0) # Start at 0%
         
         self.slider_crop_end.configure(from_=0, to=max_steps, number_of_steps=max_steps)
-        self.slider_crop_end.set(max_steps) # Start at MAX (End of file)
+        self.slider_crop_end.set(max_steps) # Start at 100%
         
-        self.update_crop_labels(0, total_samples / freq * 1000)
+        self.update_crop_labels(0, total_samples * interval_ms)
     
     def on_crop_change(self, val):
         if not self.full_recording_data or not self.cropping_mode: return
         
-        freq = self.session_config.get("frequency", 50)
-        step_samples = max(1, int(freq * 0.01))
-        
-        # Get slider values (steps)
-        start_steps = int(self.slider_crop_start.get())
-        end_steps = int(self.slider_crop_end.get())
-        
-        # Convert to samples
-        start_idx = start_steps * step_samples
-        end_idx = end_steps * step_samples # Now represents absolute end position
+        start_pct = int(self.slider_crop_start.get())
+        end_pct = int(self.slider_crop_end.get())
         
         total = len(self.full_recording_data)
+        interval_ms = getattr(self, "current_viewing_interval_ms", 1000.0 / self.session_config.get("frequency", 50))
         
-        # Validate Bounds
-        # 1. End cannot be greater than Total
+        # Convert percentages to sample indices
+        start_idx = int((start_pct / 100.0) * total)
+        end_idx = int((end_pct / 100.0) * total)
+        
+        if end_idx == 0: end_idx = 1
         if end_idx > total: end_idx = total
         
-        # 2. Start cannot be >= End
         if start_idx >= end_idx:
-            # Prevent crossover
-            # If moving start right, stop at end-1
-            # If moving end left, stop at start+1
-            # Simple approach: Clamp Start
-            if start_idx >= end_idx:
-                start_idx = max(0, end_idx - step_samples)
+            start_idx = max(0, end_idx - max(1, int(0.01 * total)))
+            self.slider_crop_start.set(int((start_idx / total) * 100))
 
-        # Update Labels
-        start_ms = (start_idx / freq) * 1000
-        end_ms = (end_idx / freq) * 1000
+        start_ms = start_idx * interval_ms
+        end_ms = end_idx * interval_ms
         self.update_crop_labels(start_ms, end_ms)
         
-        # Slice and Render
         if start_idx < end_idx:
             subset = self.full_recording_data[start_idx:end_idx]
             self.render_graph_data(subset, title_prefix="Cropped")
@@ -2168,53 +2184,54 @@ class SoterCareLocalStudio(ctk.CTk):
     def update_crop_labels(self, start_ms, end_ms):
         self.lbl_crop_start.configure(text=f"Start: {int(start_ms)}ms")
         self.lbl_crop_end.configure(text=f"End: {int(end_ms)}ms")
+        
+        duration_ms = end_ms - start_ms
+        if hasattr(self, 'lbl_crop_duration'):
+            self.lbl_crop_duration.configure(text=f"Final Length: {int(duration_ms)}ms")
 
     def save_cropped_data(self):
         if not self.full_recording_data or not self.current_viewing_filepath:
             return
             
-        # No confirmation - direct save
         try:
-            # 1. Calculate final slices
-            freq = self.session_config.get("frequency", 50)
-            step_samples = max(1, int(freq * 0.01))
+            start_pct = int(self.slider_crop_start.get())
+            end_pct = int(self.slider_crop_end.get())
             
-            start_steps = int(self.slider_crop_start.get())
-            end_steps = int(self.slider_crop_end.get())
+            total = len(self.full_recording_data)
+            start_idx = int((start_pct / 100.0) * total)
+            end_idx = int((end_pct / 100.0) * total)
             
-            start_idx = start_steps * step_samples
-            end_idx = end_steps * step_samples # Absolute position
+            if end_idx == 0: end_idx = 1
+            if end_idx > total: end_idx = total
             
-            # Safety checks
             if start_idx >= end_idx:
                 messagebox.showerror("Error", "Invalid crop selection.")
                 return
 
             new_data = self.full_recording_data[start_idx:end_idx]
             
-            # 2. Read Original JSON
             with open(self.current_viewing_filepath, 'r') as f:
                 full_json = json.load(f)
             
-            # 3. Update Payload
             full_json["payload"]["values"] = new_data
             
-            # 4. Write Back
             with open(self.current_viewing_filepath, 'w') as f:
                 json.dump(full_json, f)
             
-            # 5. Update Memory & UI
             self.full_recording_data = new_data
-            new_duration_sec = len(new_data) / freq
+            
+            interval_ms = getattr(self, "current_viewing_interval_ms", 1000.0 / self.session_config.get("frequency", 50))
+            new_duration_sec = (len(new_data) * interval_ms) / 1000.0
+            
+            # Update CSV Log
+            filename = os.path.basename(self.current_viewing_filepath)
+            self.update_csv_log_path(filename, None, int(new_duration_sec * 1000))
+            
             self.log(f"Saved cropped data. New length: {len(new_data)} samples ({new_duration_sec:.2f}s).")
             
-            # Reset Sliders
             self.setup_crop_sliders_for_data()
-            
-            # Update Graph
             self.render_graph_data(self.full_recording_data, title_prefix="Recorded")
             
-            # Update the individual recording label in the UI
             if self.current_viewing_meta:
                 m = self.current_viewing_meta.get("movement")
                 n = self.current_viewing_meta.get("num")
