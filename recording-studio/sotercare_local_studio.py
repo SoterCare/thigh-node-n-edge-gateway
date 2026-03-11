@@ -669,6 +669,16 @@ class SoterCareLocalStudio(ctk.CTk):
         )
         self.btn_crop_mode.pack(side="right", padx=10)
         
+        # Preview Mode Button
+        self.btn_preview_mode = ctk.CTkButton(
+            graph_header,
+            text="Preview Mode",
+            fg_color="#1F6AA5",
+            width=100,
+            command=self.open_preview_window
+        )
+        self.btn_preview_mode.pack(side="right", padx=10)
+        
         # Matplotlib Figure
         # Dark theme colors: Face #1a1a1a, Text white
         # Reduced height from 8 to 5 to allow room for controls
@@ -1027,6 +1037,8 @@ class SoterCareLocalStudio(ctk.CTk):
                     print(f"Scan Error: {e}")
 
                 def update_ui():
+                    if not combo_ports.winfo_exists():
+                        return
                     if port_list:
                         combo_ports.configure(values=port_list)
                         if auto_select_addr:
@@ -2256,6 +2268,467 @@ class SoterCareLocalStudio(ctk.CTk):
         except Exception as e:
             self.log(f"Error saving cropped data: {e}")
             messagebox.showerror("Error", f"Failed to save: {e}")
+
+    # --- Preview Mode Logic ---
+    def open_preview_window(self):
+        # Prevent opening multiple windows
+        if hasattr(self, "preview_window") and self.preview_window.winfo_exists():
+            self.preview_window.lift()
+            return
+            
+        self.preview_window = ctk.CTkToplevel(self)
+        self.preview_window.title("Preview Recorded Data")
+        self.preview_window.geometry("1100x700")
+        
+        # Delay icon and dark mode application slightly to prevent Windows DWM from glitching 
+        # and drawing a white titlebar on the newly spawned transparent window.
+        def apply_window_fixes():
+            try:
+                self.preview_window.iconbitmap(os.path.join(os.path.dirname(__file__), "SoterCare-icon.ico"))
+            except Exception as e:
+                print(f"Preview icon load warning: {e}")
+            ctk.set_appearance_mode("Dark")
+            
+        self.preview_window.after(200, apply_window_fixes)
+        
+        # Make the preview window transient to the main window so it stays on top of IT
+        # but not on top of the entire OS desktop.
+        self.preview_window.transient(self)
+
+        self.preview_window.grid_columnconfigure(0, weight=1, minsize=300) # List column
+        self.preview_window.grid_columnconfigure(1, weight=3) # Graph column
+        self.preview_window.grid_rowconfigure(0, weight=0) # Header
+        self.preview_window.grid_rowconfigure(1, weight=1) # Main content
+        
+        # State variables for preview
+        self.preview_folder = ""
+        self.preview_files = []
+        self.preview_current_file = ""
+        self.preview_data = []
+        self.preview_interval_ms = 20.0 # Default 50Hz
+        
+        self.preview_file_buttons = []
+        self.preview_selected_index = -1
+        
+        self.preview_window.bind("<Up>", self.preview_select_prev)
+        self.preview_window.bind("<Down>", self.preview_select_next)
+        
+        # --- Header ---
+        header_frame = ctk.CTkFrame(self.preview_window, corner_radius=10, fg_color="#1a1a1a")
+        header_frame.grid(row=0, column=0, columnspan=2, padx=20, pady=10, sticky="ew")
+        
+        ctk.CTkButton(header_frame, text="Select Folder", command=self.preview_select_folder, width=150).pack(side="left", padx=10, pady=10)
+        self.lbl_preview_folder = ctk.CTkLabel(header_frame, text="No folder selected", text_color="orange")
+        self.lbl_preview_folder.pack(side="left", padx=10)
+        
+        # --- Left Panel: File List ---
+        left_frame = ctk.CTkFrame(self.preview_window, corner_radius=10, fg_color="#1a1a1a")
+        left_frame.grid(row=1, column=0, padx=(20, 10), pady=(0, 20), sticky="nsew")
+        
+        ctk.CTkLabel(left_frame, text="JSON Files", font=("Arial", 14, "bold")).pack(pady=10)
+        
+        self.preview_list_frame = ctk.CTkScrollableFrame(left_frame, fg_color="#2b2b2b")
+        self.preview_list_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        
+        # --- Right Panel: Graph & Controls ---
+        right_frame = ctk.CTkFrame(self.preview_window, corner_radius=10, fg_color="#1a1a1a")
+        right_frame.grid(row=1, column=1, padx=(10, 20), pady=(0, 20), sticky="nsew")
+        
+        # Graphs
+        self.preview_fig = Figure(figsize=(5, 5), dpi=100, facecolor="#1a1a1a")
+        
+        self.preview_ax1 = self.preview_fig.add_subplot(211)
+        self.preview_ax1.set_facecolor("#2b2b2b")
+        self.preview_ax1.set_title("Accelerometer (g)", color="white", fontsize=10)
+        self.preview_ax1.tick_params(axis='x', colors='white')
+        self.preview_ax1.tick_params(axis='y', colors='white')
+        
+        self.preview_ax2 = self.preview_fig.add_subplot(212)
+        self.preview_ax2.set_facecolor("#2b2b2b")
+        self.preview_ax2.set_title("Gyroscope (deg/s)", color="white", fontsize=10)
+        self.preview_ax2.tick_params(axis='x', colors='white')
+        self.preview_ax2.tick_params(axis='y', colors='white')
+        
+        self.preview_fig.tight_layout()
+        
+        self.preview_canvas = FigureCanvasTkAgg(self.preview_fig, master=right_frame)
+        self.preview_canvas.draw()
+        self.preview_canvas.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # File Action Controls (Delete)
+        self.preview_file_actions = ctk.CTkFrame(right_frame, fg_color="transparent")
+        self.preview_file_actions.pack(fill="x", padx=10, pady=(0, 5))
+        
+        self.btn_preview_delete = ctk.CTkButton(
+            self.preview_file_actions,
+            text="Delete This Recording",
+            fg_color="#D32F2F", hover_color="#B71C1C",
+            command=self.preview_delete_file,
+            state="disabled"
+        )
+        self.btn_preview_delete.pack(side="right", pady=5)
+        
+        # Crop Controls
+        self.preview_crop_controls = ctk.CTkFrame(right_frame, fg_color="#2b2b2b", corner_radius=10)
+        self.preview_crop_controls.pack(fill="x", padx=10, pady=(5, 10))
+        
+        self.preview_crop_controls.columnconfigure(0, weight=1)
+        self.preview_crop_controls.columnconfigure(1, weight=1)
+        
+        self.lbl_preview_crop_start = ctk.CTkLabel(self.preview_crop_controls, text="Crop Front: 0ms", font=("Arial", 10))
+        self.lbl_preview_crop_start.grid(row=0, column=0, padx=10, pady=(5,0), sticky="w")
+        
+        self.slider_preview_crop_start = ctk.CTkSlider(
+            self.preview_crop_controls, from_=0, to=100, command=self.on_preview_crop_change, number_of_steps=100
+        )
+        self.slider_preview_crop_start.set(0)
+        self.slider_preview_crop_start.grid(row=1, column=0, padx=10, pady=5, sticky="ew")
+        
+        self.lbl_preview_crop_end = ctk.CTkLabel(self.preview_crop_controls, text="Crop Back: MAX", font=("Arial", 10))
+        self.lbl_preview_crop_end.grid(row=0, column=1, padx=10, pady=(5,0), sticky="e")
+        
+        self.slider_preview_crop_end = ctk.CTkSlider(
+            self.preview_crop_controls, from_=0, to=100, command=self.on_preview_crop_change, number_of_steps=100
+        )
+        self.slider_preview_crop_end.set(100)
+        self.slider_preview_crop_end.grid(row=1, column=1, padx=10, pady=5, sticky="ew")
+        
+        self.btn_preview_save_crop = ctk.CTkButton(
+            self.preview_crop_controls,
+            text="Save Cropped Data",
+            fg_color="#D32F2F", hover_color="#B71C1C",
+            command=self.preview_save_crop,
+            state="disabled"
+        )
+        self.btn_preview_save_crop.grid(row=2, column=0, columnspan=2, pady=10)
+        
+        self.lbl_preview_crop_duration = ctk.CTkLabel(
+            self.preview_crop_controls, text="Final Length: 0ms", font=("Arial", 12, "bold"), text_color="#00C853"
+        )
+        self.lbl_preview_crop_duration.grid(row=3, column=0, columnspan=2, pady=(0, 5))
+        
+        # Initialize empty graphs
+        self.preview_update_graph_visibility()
+
+    def preview_select_folder(self):
+        path = filedialog.askdirectory()
+        if path:
+            self.preview_folder = path
+            self.lbl_preview_folder.configure(text=f".../{os.path.basename(path)}", text_color="green")
+            self.preview_refresh_file_list()
+
+    def preview_refresh_file_list(self):
+        # Clear existing
+        for widget in self.preview_list_frame.winfo_children():
+            widget.destroy()
+            
+        self.preview_files = []
+        if not self.preview_folder or not os.path.exists(self.preview_folder): return
+        
+        # Traverse recursively to find all JSONs
+        for root, dirs, files in os.walk(self.preview_folder):
+            if "BACKUP" in root: continue # Skip backups
+            for file in files:
+                if file.endswith(".json"):
+                    full_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(full_path, self.preview_folder)
+                    self.preview_files.append((rel_path, full_path))
+        
+        if not self.preview_files:
+            ctk.CTkLabel(self.preview_list_frame, text="No .json files found.", text_color="gray").pack(pady=20)
+            return
+            
+        self.preview_file_buttons = []
+        # Add buttons for each file
+        for i, (rel_path, full_path) in enumerate(self.preview_files):
+            btn = ctk.CTkButton(
+                self.preview_list_frame,
+                text=rel_path,
+                anchor="w",
+                fg_color="transparent",
+                hover_color="#333",
+                text_color="#ddd",
+                command=lambda p=full_path, idx=i: self.preview_load_file_from_list(p, idx)
+            )
+            btn.pack(fill="x", pady=2, padx=5)
+            self.preview_file_buttons.append(btn)
+
+    def preview_load_file_from_list(self, filepath, idx):
+        self.preview_set_selected_index(idx)
+        self.preview_load_file(filepath)
+
+    def preview_set_selected_index(self, idx):
+        if not self.preview_file_buttons: return
+        
+        if 0 <= self.preview_selected_index < len(self.preview_file_buttons):
+            self.preview_file_buttons[self.preview_selected_index].configure(fg_color="transparent", text_color="#ddd")
+            
+        self.preview_selected_index = idx
+        
+        if 0 <= self.preview_selected_index < len(self.preview_file_buttons):
+            btn = self.preview_file_buttons[self.preview_selected_index]
+            btn.configure(fg_color="#1F6AA5", text_color="#ffffff")
+            
+            # Basic scrolling logic to keep item in view
+            try:
+                if hasattr(self.preview_list_frame, "_parent_canvas"):
+                    fraction = idx / max(1, len(self.preview_file_buttons))
+                    center_frac = max(0, fraction - 0.1)
+                    self.preview_list_frame._parent_canvas.yview_moveto(center_frac)
+            except Exception: pass
+
+    def preview_select_prev(self, event=None):
+        if getattr(self, "preview_files", None):
+            new_idx = self.preview_selected_index - 1
+            if new_idx < 0: new_idx = 0
+            if new_idx != self.preview_selected_index and new_idx < len(self.preview_files):
+                filepath = self.preview_files[new_idx][1]
+                self.preview_load_file_from_list(filepath, new_idx)
+            
+    def preview_select_next(self, event=None):
+        if getattr(self, "preview_files", None):
+            new_idx = self.preview_selected_index + 1
+            if new_idx >= len(self.preview_files): new_idx = len(self.preview_files) - 1
+            if new_idx != self.preview_selected_index and new_idx >= 0:
+                filepath = self.preview_files[new_idx][1]
+                self.preview_load_file_from_list(filepath, new_idx)
+
+    def preview_load_file(self, filepath):
+        if not os.path.exists(filepath):
+            messagebox.showerror("Error", "File not found.", parent=self.preview_window)
+            return
+
+        try:
+            with open(filepath, 'r') as f:
+                data = json.load(f)
+                
+            sensor_data = data.get("payload", {}).get("values", [])
+            freq = data.get("payload", {}).get("interval_ms")
+            
+            if freq:
+                self.preview_interval_ms = freq
+            else:
+                self.preview_interval_ms = 1000.0 / self.session_config.get("frequency", 50)
+                
+            if not sensor_data:
+                # If empty
+                self.preview_data = []
+                self.preview_current_file = ""
+                messagebox.showinfo("Empty", "This file contains no data (possibly deleted).", parent=self.preview_window)
+                self.preview_update_graph_visibility()
+                self.btn_preview_delete.configure(state="disabled")
+                self.btn_preview_save_crop.configure(state="disabled")
+                return
+                
+            self.preview_data = sensor_data
+            self.preview_current_file = filepath
+            
+            self.btn_preview_delete.configure(state="normal")
+            self.btn_preview_save_crop.configure(state="normal")
+            
+            # Setup crop sliders
+            self.preview_setup_crop_sliders()
+            
+            # Render graph
+            self.preview_render_graph(self.preview_data, title_prefix="Preview")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load file:\n{e}", parent=self.preview_window)
+
+    def preview_update_graph_visibility(self):
+        self.preview_ax1.clear()
+        self.preview_ax1.set_facecolor("#2b2b2b")
+        self.preview_ax1.set_xticks([])
+        self.preview_ax1.tick_params(axis='y', colors='#aaa')
+        self.preview_ax1.set_ylim(-2.0, 2.0)
+        self.preview_ax1.set_title("Accelerometer (g)", color="#777", fontsize=10)
+        
+        self.preview_ax2.clear()
+        self.preview_ax2.set_facecolor("#2b2b2b")
+        self.preview_ax2.set_xticks([])
+        self.preview_ax2.tick_params(axis='y', colors='#aaa')
+        self.preview_ax2.set_ylim(-400, 400)
+        self.preview_ax2.set_title("Gyroscope (deg/s)", color="#777", fontsize=10)
+        
+        self.preview_canvas.draw()
+
+    def preview_render_graph(self, data, title_prefix="Preview"):
+        if not data: return
+        cols = len(data[0])
+        
+        ax_data, ay_data, az_data = [], [], []
+        gx_data, gy_data, gz_data = [], [], []
+        
+        has_accel = False
+        has_gyro = False
+        
+        if cols == 6:
+            has_accel = True
+            has_gyro = True
+            ax_data = [d[0] for d in data]
+            ay_data = [d[1] for d in data]
+            az_data = [d[2] for d in data]
+            gx_data = [d[3] for d in data]
+            gy_data = [d[4] for d in data]
+            gz_data = [d[5] for d in data]
+        elif cols == 3:
+            max_val = max([abs(val) for row in data for val in row])
+            if max_val > 50:
+                has_gyro = True
+                gx_data = [d[0] for d in data]
+                gy_data = [d[1] for d in data]
+                gz_data = [d[2] for d in data]
+            else:
+                has_accel = True
+                ax_data = [d[0] for d in data]
+                ay_data = [d[1] for d in data]
+                az_data = [d[2] for d in data]
+                
+        times = range(len(data))
+        
+        # --- Plot Accel ---
+        self.preview_ax1.clear()
+        self.preview_ax1.set_facecolor("#2b2b2b")
+        if has_accel:
+            self.preview_ax1.set_title(f"{title_prefix} Accelerometer (g)", color="white", fontsize=10)
+            self.preview_ax1.plot(times, ax_data, label='X', color='#FF5252', linewidth=1)
+            self.preview_ax1.plot(times, ay_data, label='Y', color='#448AFF', linewidth=1)
+            self.preview_ax1.plot(times, az_data, label='Z', color='#69F0AE', linewidth=1)
+            self.preview_ax1.grid(True, color="#444", linestyle='--', linewidth=0.5)
+            self.preview_ax1.legend(loc='upper right', facecolor="#333", edgecolor="white", labelcolor="white", fontsize=8)
+        else:
+            self.preview_ax1.set_title(f"{title_prefix} Accelerometer (Disabled or N/A)", color="#777", fontsize=10)
+        self.preview_ax1.set_xticks([])
+        self.preview_ax1.tick_params(axis='y', colors='#aaa')
+        self.preview_ax1.set_ylim(-2.0, 2.0)
+
+        # --- Plot Gyro ---
+        self.preview_ax2.clear()
+        self.preview_ax2.set_facecolor("#2b2b2b")
+        if has_gyro:
+            self.preview_ax2.set_title(f"{title_prefix} Gyroscope", color="white", fontsize=10)
+            self.preview_ax2.plot(times, gx_data, label='X', color='#FF5252', linewidth=1)
+            self.preview_ax2.plot(times, gy_data, label='Y', color='#448AFF', linewidth=1)
+            self.preview_ax2.plot(times, gz_data, label='Z', color='#69F0AE', linewidth=1)
+            self.preview_ax2.grid(True, color="#444", linestyle='--', linewidth=0.5)
+            self.preview_ax2.legend(loc='upper right', facecolor="#333", edgecolor="white", labelcolor="white", fontsize=8)
+        else:
+            self.preview_ax2.set_title(f"{title_prefix} Gyroscope (Disabled or N/A)", color="#777", fontsize=10)
+        self.preview_ax2.set_xticks([])
+        self.preview_ax2.tick_params(axis='y', colors='#aaa')
+        self.preview_ax2.set_ylim(-400, 400)
+        
+        self.preview_canvas.draw()
+        
+    def preview_setup_crop_sliders(self):
+        if not self.preview_data: return
+        total_samples = len(self.preview_data)
+        
+        max_steps = 100
+        self.slider_preview_crop_start.configure(from_=0, to=max_steps, number_of_steps=max_steps)
+        self.slider_preview_crop_start.set(0)
+        
+        self.slider_preview_crop_end.configure(from_=0, to=max_steps, number_of_steps=max_steps)
+        self.slider_preview_crop_end.set(max_steps)
+        
+        self.preview_update_crop_labels(0, total_samples * self.preview_interval_ms)
+
+    def on_preview_crop_change(self, val):
+        if not self.preview_data: return
+        
+        start_pct = int(self.slider_preview_crop_start.get())
+        end_pct = int(self.slider_preview_crop_end.get())
+        total = len(self.preview_data)
+        
+        start_idx = int((start_pct / 100.0) * total)
+        end_idx = int((end_pct / 100.0) * total)
+        
+        if end_idx == 0: end_idx = 1
+        if end_idx > total: end_idx = total
+        
+        if start_idx >= end_idx:
+            start_idx = max(0, end_idx - max(1, int(0.01 * total)))
+            self.slider_preview_crop_start.set(int((start_idx / total) * 100))
+            
+        start_ms = start_idx * self.preview_interval_ms
+        end_ms = end_idx * self.preview_interval_ms
+        self.preview_update_crop_labels(start_ms, end_ms)
+        
+        if start_idx < end_idx:
+            subset = self.preview_data[start_idx:end_idx]
+            self.preview_render_graph(subset, title_prefix="Cropped")
+
+    def preview_update_crop_labels(self, start_ms, end_ms):
+        self.lbl_preview_crop_start.configure(text=f"Start: {int(start_ms)}ms")
+        self.lbl_preview_crop_end.configure(text=f"End: {int(end_ms)}ms")
+        duration_ms = end_ms - start_ms
+        self.lbl_preview_crop_duration.configure(text=f"Final Length: {int(duration_ms)}ms")
+
+    def preview_save_crop(self):
+        if not self.preview_data or not self.preview_current_file: return
+        
+        try:
+            start_pct = int(self.slider_preview_crop_start.get())
+            end_pct = int(self.slider_preview_crop_end.get())
+            total = len(self.preview_data)
+            
+            start_idx = int((start_pct / 100.0) * total)
+            end_idx = int((end_pct / 100.0) * total)
+            
+            if end_idx == 0: end_idx = 1
+            if end_idx > total: end_idx = total
+            
+            if start_idx >= end_idx:
+                messagebox.showerror("Error", "Invalid crop selection.", parent=self.preview_window)
+                return
+                
+            new_data = self.preview_data[start_idx:end_idx]
+            
+            with open(self.preview_current_file, 'r') as f:
+                full_json = json.load(f)
+                
+            full_json["payload"]["values"] = new_data
+            
+            with open(self.preview_current_file, 'w') as f:
+                json.dump(full_json, f)
+                
+            self.preview_data = new_data
+            new_duration_sec = (len(new_data) * self.preview_interval_ms) / 1000.0
+            
+            if hasattr(self, 'root_folder') and self.root_folder:
+                if self.root_folder in self.preview_current_file:
+                    self.update_csv_log_path(os.path.basename(self.preview_current_file), None, int(new_duration_sec * 1000))
+            
+            self.preview_setup_crop_sliders()
+            self.preview_render_graph(self.preview_data, title_prefix="Recorded")
+            messagebox.showinfo("Success", f"Cropped data saved successfully. New length: {new_duration_sec:.2f}s", parent=self.preview_window)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save cropped data: {e}", parent=self.preview_window)
+
+    def preview_delete_file(self):
+        if not self.preview_current_file: return
+        
+        confirm = messagebox.askyesno("Delete", "Are you sure you want to permanently delete this JSON file?", parent=self.preview_window)
+        if not confirm: return
+        
+        try:
+            if hasattr(self, 'root_folder') and self.root_folder:
+                if self.root_folder in self.preview_current_file:
+                    self.update_csv_log_path(os.path.basename(self.preview_current_file), "deleted")
+            
+            os.remove(self.preview_current_file)
+                    
+            self.preview_data = []
+            self.preview_current_file = ""
+            self.preview_update_graph_visibility()
+            self.btn_preview_delete.configure(state="disabled")
+            self.btn_preview_save_crop.configure(state="disabled")
+            
+            self.preview_refresh_file_list()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to delete file: {e}", parent=self.preview_window)
 
 if __name__ == "__main__":
     app = SoterCareLocalStudio()
