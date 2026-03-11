@@ -2291,9 +2291,10 @@ class SoterCareLocalStudio(ctk.CTk):
             
         self.preview_window.after(200, apply_window_fixes)
         
-        # Make the preview window transient to the main window so it stays on top of IT
-        # but not on top of the entire OS desktop.
-        self.preview_window.transient(self)
+        # Bring the newly created window to the front without locking it 
+        # as a strict un-minimizable dialog.
+        self.preview_window.lift()
+        self.preview_window.focus()
 
         self.preview_window.grid_columnconfigure(0, weight=1, minsize=300) # List column
         self.preview_window.grid_columnconfigure(1, weight=3) # Graph column

@@ -93,6 +93,15 @@ The dashboard is divided into two main sections:
 - **Live Mode**: Toggle this to view real-time sensor data from the ESP32 to verify sensor placement.
 - **Graphs**: Visualizes Accelerometer and Gyroscope data.
 
+### 4. Preview Mode
+
+The Studio features a dedicated standalone window for reviewing past recordings:
+- **Launch**: Click the **Preview Mode** button located next to Live Mode.
+- **Select Folder**: Browse to a previous session's directory to automatically load all stored JSON recordings into a scrollable list.
+- **Navigate & View**: Use the `Up` and `Down` arrow keys or click the files in the left panel to instantly populate the Accelerometer and Gyroscope charts with the historical data.
+- **Crop**: Use the Front and Back sliders to trim the data and click **Save Cropped Data** to permanently trim the file while retaining its structural integrity.
+- **Delete**: Click **Delete This Recording** to permanently wipe the file from your local storage and strike it from your CSV tracking logs.
+
 ---
 
 ## 🔧 Device Status (LED Codes)
