@@ -8,12 +8,16 @@ Vite dashboard at http://localhost:5173 via WebSocket.
 
 import threading
 import time
+import json
+from flask import request # type: ignore
 
 import redis as redis_lib # type: ignore
 from flask import Flask, jsonify # type: ignore
+from flask_cors import CORS # type: ignore
 from flask_socketio import SocketIO, emit # type: ignore
 
 app = Flask(__name__)
+CORS(app) # Enable CORS for all API routes
 app.config["SECRET_KEY"] = "sotercare-secret"
 
 # threading mode — avoids eventlet monkey-patching issues on Windows
@@ -55,10 +59,102 @@ def api_status():
         length = r.xlen(REDIS_STREAM)
         latest = r.xrevrange(REDIS_STREAM, count=1)
         source = latest[0][1].get("source", "unknown") if latest else "none"
-        return jsonify({"stream_length": length, "source": source, "status": "ok"})
+        
+        # Optionally, get the last connected device
+        last_device = None
+        try:
+            with open("last_device.json", "r") as f:
+                last_device = json.load(f)
+        except Exception:
+            pass
+            
+        # Get the host's local IP to auto-fill dashboard configuration
+        local_ip = "192.168.1.something"
+        try:
+            import socket
+            hostname = socket.gethostname()
+            local_ip = socket.gethostbyname(hostname)
+        except Exception:
+            pass
+            
+        return jsonify({
+            "stream_length": length, 
+            "source": source, 
+            "status": "ok",
+            "last_device": last_device,
+            "local_ip": local_ip
+        })
     except Exception as e:
         return jsonify({"status": "error", "detail": str(e)}), 500
 
+@app.route("/api/scan")
+def api_scan():
+    """Triggers a BLE scan in gateway_master.py and waits for the result via Redis."""
+    try:
+        pubsub = r.pubsub()
+        pubsub.subscribe("sotercare_responses")
+        
+        # Publish scan command
+        r.publish("sotercare_commands", json.dumps({"cmd": "scan"}))
+        
+        # Wait for response (up to 10 seconds)
+        start_time = time.time()
+        while time.time() - start_time < 10.0:
+            message = pubsub.get_message(ignore_subscribe_messages=True, timeout=0.1)
+            if message:
+                data = json.loads(message['data'])
+                if data.get("cmd") == "scan_result":
+                    return jsonify({"status": "ok", "devices": data.get("devices", [])})
+            time.sleep(0.1)
+            
+        return jsonify({"status": "error", "message": "Scan timeout"}), 504
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route("/api/configure", methods=["POST"])
+def api_configure():
+    """Triggers a BLE connection and payload write in gateway_master.py."""
+    data = request.json
+    if not data or not all(k in data for k in ("address", "ssid", "password", "ip")):
+        return jsonify({"status": "error", "message": "Missing parameters"}), 400
+        
+    try:
+        pubsub = r.pubsub()
+        pubsub.subscribe("sotercare_responses")
+        
+        req = {
+            "cmd": "configure",
+            "address": data["address"],
+            "ssid": data["ssid"],
+            "password": data["password"],
+            "ip": data["ip"]
+        }
+        r.publish("sotercare_commands", json.dumps(req))
+        
+        # Wait for response (up to 15 seconds)
+        start_time = time.time()
+        while time.time() - start_time < 15.0:
+            message = pubsub.get_message(ignore_subscribe_messages=True, timeout=0.1)
+            if message:
+                resp = json.loads(message['data'])
+                if resp.get("cmd") == "configure_result":
+                    return jsonify(resp)
+            time.sleep(0.1)
+            
+        return jsonify({"status": "error", "message": "Configuration timeout"}), 504
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route("/api/reset", methods=["POST"])
+def api_reset():
+    """Flushes previous connection data from the Edge Gateway."""
+    try:
+        import os
+        if os.path.exists("last_device.json"):
+            os.remove("last_device.json")
+        return jsonify({"status": "ok", "message": "Connection data reset"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @socketio.on("connect")
 def on_connect():

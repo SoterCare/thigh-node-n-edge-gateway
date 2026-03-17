@@ -9,7 +9,8 @@
 #include <Adafruit_MLX90614.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_NeoPixel.h>
-#include "env.h"
+#include <Preferences.h>
+#include <ArduinoJson.h>
 
 // --- Pin Definitions ---
 #define I2C_SDA_PIN 8
@@ -35,10 +36,12 @@ WiFiUDP udp;
 
 // --- BLE Nordic UART Service UUIDs ---
 #define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
 BLEServer *pServer = NULL;
 BLECharacteristic * pTxCharacteristic;
+BLECharacteristic * pRxCharacteristic;
 bool bleConnected = false;
 
 // --- System Variables ---
@@ -49,6 +52,14 @@ bool isScreenAwake = true;
 bool usingWiFi = false;
 bool oledInitialized = false;
 bool oledPlugAndPlayActive = false; // By default, OLED is ignored to save I2C hangs
+
+// --- Preferences & dynamic WiFi ---
+Preferences preferences;
+String currentSSID = "";
+String currentPassword = "";
+String currentGatewayIP = "";
+const int udpPort = 1234;
+bool hasSavedCredentials = false;
 
 // Sensor State Tracking
 int currentRawMoisture = 0;
@@ -72,7 +83,8 @@ enum MenuState {
   MENU_LOG, 
   MENU_NETWORK,
   MENU_SERIAL_MONITOR,
-  MENU_NETWORK_TEST
+  MENU_NETWORK_TEST,
+  MENU_PREFERENCES
 };
 MenuState currentMenu = MENU_MAIN; 
 
@@ -192,6 +204,42 @@ class MyServerCallbacks: public BLEServerCallbacks {
     }
 };
 
+class MyRxCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+      // In newer ESP32 Arduino Cores (v3+), getValue returns an Arduino String
+      String rxValue = pCharacteristic->getValue();
+      if (rxValue.length() > 0) {
+        systemPrint("Received Config via BLE");
+        
+        StaticJsonDocument<256> doc;
+        DeserializationError error = deserializeJson(doc, rxValue);
+
+        if (error) {
+          systemPrint("Failed to parse config JSON");
+          return;
+        }
+
+        String newSSID = doc["ssid"] | "";
+        String newPass = doc["pass"] | "";
+        String newIP = doc["ip"] | "";
+
+        if (newSSID.length() > 0 && newIP.length() > 0) {
+          preferences.begin("sotercare", false);
+          preferences.putString("ssid", newSSID);
+          preferences.putString("pass", newPass);
+          preferences.putString("ip", newIP);
+          preferences.end();
+          
+          systemPrint("Config saved! Rebooting...");
+          delay(1000);
+          ESP.restart(); // Reboot to apply new credentials cleanly
+        } else {
+          systemPrint("Invalid config payload");
+        }
+      }
+    }
+};
+
 // Live Boot Screen Updater
 void printBootStatus(String step, String status) {
   String fullMsg = step + status;
@@ -288,15 +336,36 @@ void setup() {
                         BLECharacteristic::PROPERTY_NOTIFY
                       );
   pTxCharacteristic->addDescriptor(new BLE2902());
+  
+  pRxCharacteristic = pService->createCharacteristic(
+                        CHARACTERISTIC_UUID_RX,
+                        BLECharacteristic::PROPERTY_WRITE
+                      );
+  pRxCharacteristic->setCallbacks(new MyRxCallbacks());
+  
   pService->start();
   pServer->getAdvertising()->start();
   printBootStatus("BLE Radio: ", "Ready");
   delay(500);
 
+  // Load Credentials from NVS
+  preferences.begin("sotercare", false);
+  currentSSID = preferences.getString("ssid", ""); // Default to empty string
+  currentPassword = preferences.getString("pass", "");
+  currentGatewayIP = preferences.getString("ip", "");
+  preferences.end();
+  
+  hasSavedCredentials = (currentSSID.length() > 0 && currentGatewayIP.length() > 0);
+
   // Init Wi-Fi (Non-blocking start)
-  printBootStatus("Wi-Fi: ", "Starting Discovery...");
-  WiFi.begin(ssid, password);
-  systemPrint("Hunting for Any Connection...");
+  if (hasSavedCredentials) {
+    printBootStatus("Wi-Fi: ", "Connecting Saved...");
+    systemPrint("Connecting to " + currentSSID);
+    WiFi.begin(currentSSID.c_str(), currentPassword.c_str());
+  } else {
+    printBootStatus("Wi-Fi: ", "No Config.");
+    systemPrint("No WiFi saved. Please config via BLE.");
+  }
 
   lastButtonPressTime = millis();
 }
@@ -365,9 +434,13 @@ void loop() {
     if (usingWiFi) {
       cachedRSSI = WiFi.RSSI();
       
-      // Prevent user walking out of range: Vibrate if signal drops below -80 dBm
-      if (cachedRSSI < -80) {
-        if (millis() - lastLowSignalVib >= 3000) { // Pulse every 3s
+      // Prevent user walking out of range: Vibrate aggressively as signal drops
+      if (cachedRSSI <= -78) {
+        unsigned long interval = 3000; // Slow: <= -78
+        if (cachedRSSI <= -82) interval = 500; // Rapid: <= -82
+        else if (cachedRSSI <= -80) interval = 1500; // Mid: <= -80
+        
+        if (millis() - lastLowSignalVib >= interval) {
           lastLowSignalVib = millis();
           digitalWrite(MOTOR_PIN, HIGH);
           sosMotorUntil = millis() + 150; // 150ms non-blocking pulse
@@ -428,7 +501,7 @@ void sendData() {
   }
 
   if (routeWiFi) {
-    udp.beginPacket(gatewayIP, udpPort);
+    udp.beginPacket(currentGatewayIP.c_str(), udpPort);
     udp.write((const uint8_t*)payload, strlen(payload));
     udp.endPacket();
   } else if (bleConnected) {
@@ -471,12 +544,22 @@ void checkNetworkStability() {
   // ── Connection Hunting Logic (AUTO mode) ──────────────────────────────────
   if (netMode == MODE_AUTO) {
     if (!usingWiFi && !bleConnected) {
-      // Hunting for both — blink Green/Blue
-      if (millis() - lastBlinkTime > 500) {
-        lastBlinkTime = millis();
-        ledBlinkState = !ledBlinkState;
-        if (ledBlinkState) setLED(0, 255, 0);
-        else setLED(0, 128, 255);
+      if (!hasSavedCredentials) {
+        // Unconfigured (Awaiting Setup via BLE) — Blink Blue rapidly
+        if (millis() - lastBlinkTime > 200) {
+          lastBlinkTime = millis();
+          ledBlinkState = !ledBlinkState;
+          if (ledBlinkState) setLED(0, 128, 255);
+          else setLED(0, 0, 0);
+        }
+      } else {
+        // Hunting for both — blink Green/Blue rapidly
+        if (millis() - lastBlinkTime > 200) {
+          lastBlinkTime = millis();
+          ledBlinkState = !ledBlinkState;
+          if (ledBlinkState) setLED(0, 255, 0);
+          else setLED(0, 128, 255);
+        }
       }
     }
     else if (!usingWiFi && bleConnected) {
@@ -488,9 +571,11 @@ void checkNetworkStability() {
       static unsigned long lastReconnectAttempt = 0;
       if (millis() - lastReconnectAttempt > 5000) {
         lastReconnectAttempt = millis();
-        systemPrint("Hunting WiFi...");
-        WiFi.disconnect();
-        WiFi.begin(ssid, password);
+        if (hasSavedCredentials) {
+            systemPrint("Hunting WiFi...");
+            WiFi.disconnect();
+            WiFi.begin(currentSSID.c_str(), currentPassword.c_str());
+        }
       }
     }
   }
@@ -588,9 +673,9 @@ void handleButtons() {
   bool curUp = digitalRead(BTN_UP);
   if (curUp == LOW && prevUp == HIGH) {
     triggerHaptic(30);
-    if      (currentMenu == MENU_MAIN)           mainMenuCursor = (mainMenuCursor - 1 + 4) % 4;
+    if      (currentMenu == MENU_MAIN)           mainMenuCursor = (mainMenuCursor - 1 + 5) % 5;
     else if (currentMenu == MENU_SENSOR_LIST)    sensorMenuCursor = (sensorMenuCursor - 1 + 3) % 3;
-    else if (currentMenu == MENU_NETWORK)        networkMenuCursor = (networkMenuCursor - 1 + 4) % 4;
+    else if (currentMenu == MENU_NETWORK)        networkMenuCursor = (networkMenuCursor - 1 + 5) % 5;
     else if (currentMenu == MENU_SERIAL_MONITOR && serialLogScroll < 15) serialLogScroll++;
   }
   prevUp = curUp;
@@ -600,9 +685,9 @@ void handleButtons() {
   bool curDown = digitalRead(BTN_DOWN);
   if (curDown == LOW && prevDown == HIGH) {
     triggerHaptic(30);
-    if      (currentMenu == MENU_MAIN)           mainMenuCursor = (mainMenuCursor + 1) % 4;
+    if      (currentMenu == MENU_MAIN)           mainMenuCursor = (mainMenuCursor + 1) % 5;
     else if (currentMenu == MENU_SENSOR_LIST)    sensorMenuCursor = (sensorMenuCursor + 1) % 3;
-    else if (currentMenu == MENU_NETWORK)        networkMenuCursor = (networkMenuCursor + 1) % 4;
+    else if (currentMenu == MENU_NETWORK)        networkMenuCursor = (networkMenuCursor + 1) % 5;
     else if (currentMenu == MENU_SERIAL_MONITOR && serialLogScroll > 0) serialLogScroll--;
   }
   prevDown = curDown;
@@ -616,7 +701,7 @@ void handleButtons() {
       triggerHaptic(100);
 
       if      (currentMenu == MENU_SENSOR_VIEW)  currentMenu = MENU_SENSOR_LIST;
-      else if (currentMenu == MENU_NETWORK_TEST) currentMenu = MENU_NETWORK;
+      else if (currentMenu == MENU_NETWORK_TEST || currentMenu == MENU_PREFERENCES) currentMenu = MENU_NETWORK;
       else if (currentMenu == MENU_SENSOR_LIST || currentMenu == MENU_LOG ||
                currentMenu == MENU_NETWORK     || currentMenu == MENU_SERIAL_MONITOR) {
         currentMenu = MENU_MAIN;
@@ -637,6 +722,22 @@ void handleButtons() {
         else if (mainMenuCursor == 1) currentMenu = MENU_LOG;
         else if (mainMenuCursor == 2) currentMenu = MENU_NETWORK;
         else if (mainMenuCursor == 3) currentMenu = MENU_SERIAL_MONITOR;
+        else if (mainMenuCursor == 4) {
+          preferences.begin("sotercare", false);
+          preferences.clear();
+          preferences.end();
+          
+          display.clearDisplay();
+          display.setTextColor(SSD1306_WHITE);
+          display.setCursor(10, 20);
+          display.print("Device Reset!");
+          display.setCursor(10, 35);
+          display.print("Rebooting...");
+          display.display();
+          
+          delay(2000);
+          ESP.restart();
+        }
       }
       else if (currentMenu == MENU_SENSOR_LIST) {
         currentMenu = MENU_SENSOR_VIEW;
@@ -646,6 +747,7 @@ void handleButtons() {
         else if (networkMenuCursor == 1) { netMode = MODE_WIFI_ONLY; setLED(0, 255, 0); }
         else if (networkMenuCursor == 2) { netMode = MODE_BLE_ONLY;  setLED(0, 128, 255); }
         else if (networkMenuCursor == 3) { currentMenu = MENU_NETWORK_TEST; }
+        else if (networkMenuCursor == 4) { currentMenu = MENU_PREFERENCES; }
       }
     }
     btnEnterPressTime = 0;
@@ -714,12 +816,12 @@ void handleScreen() {
     // Divider
     display.drawFastHLine(0, 9, 128, SSD1306_WHITE);
 
-    // Menu items — 4 items, each 12px tall from y=12
-    const char* items[] = {"Sensor Test", "Error Log", "Network Mode", "Monitor"};
-    for (int i = 0; i < 4; i++) {
-      int itemY = 12 + (i * 12);
+    // Menu items — 5 items, each 9px tall from y=12
+    const char* items[] = {"Sensor Test", "Error Log", "Network Mode", "Monitor", "Reset Device"};
+    for (int i = 0; i < 5; i++) {
+      int itemY = 12 + (i * 9);
       if (mainMenuCursor == i) {
-        display.fillRect(0, itemY - 1, 128, 11, SSD1306_WHITE);
+        display.fillRect(0, itemY - 1, 128, 9, SSD1306_WHITE);
         display.setTextColor(SSD1306_BLACK);
         display.setCursor(4, itemY);
         display.print(items[i]);
@@ -844,13 +946,13 @@ void handleScreen() {
     display.print("  NETWORK MODE");
     display.drawFastHLine(0, 9, 128, SSD1306_WHITE);
 
-    const char* netItems[] = {"AUTO", "WI-FI ONLY", "BLE ONLY", "Test Network"};
-    bool activeState[] = {netMode == MODE_AUTO, netMode == MODE_WIFI_ONLY, netMode == MODE_BLE_ONLY, false};
+    const char* netItems[] = {"AUTO", "WI-FI ONLY", "BLE ONLY", "Test Network", "Preferences"};
+    bool activeState[] = {netMode == MODE_AUTO, netMode == MODE_WIFI_ONLY, netMode == MODE_BLE_ONLY, false, false};
 
-    for (int i = 0; i < 4; i++) {
-      int itemY = 12 + (i * 11);
+    for (int i = 0; i < 5; i++) {
+      int itemY = 12 + (i * 10); // slightly smaller spacing to fit 5 items
       if (networkMenuCursor == i) {
-        display.fillRect(0, itemY - 1, 128, 10, SSD1306_WHITE);
+        display.fillRect(0, itemY - 1, 128, 9, SSD1306_WHITE);
         display.setTextColor(SSD1306_BLACK);
         display.setCursor(4, itemY);
         display.print(i < 3 && activeState[i] ? "* " : "  ");
@@ -880,14 +982,42 @@ void handleScreen() {
       display.setCursor(0, 34);
       display.printf("RSSI:   %d dBm", WiFi.RSSI());
       display.setCursor(0, 45);
-      display.print("GW: "); display.print(gatewayIP);
+      display.print("GW: "); display.print(currentGatewayIP);
     } else {
       display.setCursor(14, 18);
       display.print("DISCONNECTED");
       display.setCursor(8, 32);
       display.print("Check router or");
       display.setCursor(20, 42);
-      display.print("env.h SSID");
+      display.print("setup via BLE");
+    }
+
+    display.drawFastHLine(0, 55, 128, SSD1306_WHITE);
+    display.setCursor(10, 57);
+    display.print("Hold ENTER: Back");
+  }
+
+  // ========================
+  // PREFERENCES
+  // ========================
+  else if (currentMenu == MENU_PREFERENCES) {
+    display.setCursor(0, 0);
+    display.print("  PREFERENCES");
+    display.drawFastHLine(0, 9, 128, SSD1306_WHITE);
+
+    if (hasSavedCredentials) {
+      display.setCursor(0, 13);
+      display.print("SSID:");
+      display.setCursor(0, 23);
+      display.print(currentSSID.substring(0, 20)); // truncate if too long
+      
+      display.setCursor(0, 36);
+      display.print("GW IP:");
+      display.setCursor(0, 46);
+      display.print(currentGatewayIP);
+    } else {
+      display.setCursor(10, 28);
+      display.print("No Config Saved");
     }
 
     display.drawFastHLine(0, 55, 128, SSD1306_WHITE);

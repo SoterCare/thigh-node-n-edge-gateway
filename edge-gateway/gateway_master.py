@@ -18,6 +18,7 @@ import socket
 import subprocess
 import threading
 import time
+import json
 from typing import Any, Dict, List, cast
 
 import redis # type: ignore
@@ -31,10 +32,13 @@ BLE_DEVICE_NAME = "SoterCare_BLE"
 BLE_TX_UUID     = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
 REDIS_STREAM    = "sotercare_history"
+REDIS_COMMANDS  = "sotercare_commands"
+REDIS_RESPONSES = "sotercare_responses"
 REDIS_MAXLEN    = 1000
 
 RESAMPLE_DROP_N = 6        # Drop 1 in 6 → 60Hz → 50Hz
 BLE_TIMEOUT_S   = 2.5      # Seconds of UDP silence before BLE activates
+BLE_RX_UUID     = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 # Fall detection constants moved to fall_detector.py
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model", "gait_model.eim")
@@ -135,11 +139,12 @@ def udp_listener_thread():
             print(f"[UDP] Error: {e}")
 
 
-# ── BLE Async Task ────────────────────────────────────────────────────────────
+# ── BLE Auto-Fallback Task ───────────────────────────────────────────────────
 async def ble_task():
     """
-    Monitors UDP silence. When UDP drops out, connects to SoterCare_BLE.
-    Disconnects and stands down as soon as UDP resumes.
+    Monitors UDP silence. If UDP drops out AND a configured device exists,
+    it connects to that specific device to resume the data stream.
+    Disconnects and stands down as soon as UDP resumes or device is reset.
     """
     global connection_mode
     client: BleakClient | None = None
@@ -147,35 +152,45 @@ async def ble_task():
 
     # Give the UDP listener a few seconds to start before BLE kicks in
     await asyncio.sleep(4.0)
-    print("[BLE] Watchdog started.")
+    print("[BLE] Fallback watchdog started.")
 
     while True:
-        if wifi_is_alive():
-            # UDP is healthy — ensure BLE is disconnected
+        # Check if a configured device exists
+        configured_mac = None
+        try:
+            if os.path.exists("last_device.json"):
+                with open("last_device.json", "r") as f:
+                    data = json.load(f)
+                    configured_mac = data.get("address")
+        except Exception:
+            pass
+
+        # If no configured device or UDP is healthy, ensure BLE is disconnected
+        if not configured_mac or wifi_is_alive():
             c = client
             if ble_active and c is not None and c.is_connected:
-                print("[BLE] UDP active. Disconnecting BLE.")
+                print("[BLE] Standing down auto-fallback.")
                 try:
                     await c.disconnect()
                 except Exception:
                     pass
                 client = None
                 ble_active = False
-            set_state("wifi")
+            
+            if wifi_is_alive():
+                set_state("wifi")
+            elif not configured_mac:
+                with _state_lock:
+                    connection_mode = "awaiting_setup"
+            
             await asyncio.sleep(0.5)
             continue
 
-        # UDP is silent — activate BLE if not already connected
-        if not ble_active:
+        # UDP is silent AND a device is configured — activate BLE fallback
+        if not ble_active and configured_mac:
             with _state_lock:
-                connection_mode = "searching"
-            print(f"[BLE] UDP silent. Scanning for {BLE_DEVICE_NAME}...")
-
-            device = await BleakScanner.find_device_by_name(BLE_DEVICE_NAME, timeout=10.0)
-            if device is None:
-                print(f"[BLE] {BLE_DEVICE_NAME} not found. Will retry...")
-                await asyncio.sleep(3.0)
-                continue
+                connection_mode = "connecting_ble"
+            print(f"[BLE] UDP silent. Falling back to configured node: {configured_mac}...")
 
             def on_notify(sender, data):
                 raw = data.decode("utf-8", errors="ignore")
@@ -188,28 +203,105 @@ async def ble_task():
                         pass
 
             try:
+                device = await BleakScanner.find_device_by_address(configured_mac, timeout=10.0)
+                if not device:
+                    print(f"[BLE] Fallback node {configured_mac} not found in scan.")
+                    await asyncio.sleep(3.0)
+                    continue
+
                 client = BleakClient(device, disconnected_callback=lambda _: None)
                 await client.connect(timeout=10.0)
                 await client.start_notify(BLE_TX_UUID, on_notify)
                 ble_active = True
                 set_state("ble")
-                print(f"[BLE] Connected to {BLE_DEVICE_NAME}")
+                print(f"[BLE] Successfully connected to fallback node: {configured_mac}")
             except Exception as e:
-                print(f"[BLE] Connection failed: {e}")
+                print(f"[BLE] Fallback connection failed: {e}")
                 client = None
                 await asyncio.sleep(3.0)
                 continue
 
-        # While BLE is active, keep checking if UDP comes back
+        # While BLE is active, keep checking if UDP comes back or device is reset
         await asyncio.sleep(0.5)
 
         # If BLE client dropped unexpectedly, reset
         c_drop = client
         if ble_active and c_drop is not None and not c_drop.is_connected:
-            print("[BLE] Connection dropped. Will reconnect.")
+            print("[BLE] Fallback connection dropped. Will reconnect.")
             client = None
             ble_active = False
-            set_state("searching")
+            if configured_mac:
+                set_state("connecting_ble")
+            else:
+                set_state("awaiting_setup")
+
+# ── Command Listener Task (Redis PubSub) ──────────────────────────────────────
+async def command_listener_task():
+    """Listens for commands from the dashboard (via server.py) over Redis PubSub."""
+    r_async = redis.Redis(host="localhost", port=6379, decode_responses=True)
+    pubsub = r_async.pubsub()
+    pubsub.subscribe(REDIS_COMMANDS)
+    
+    print("[CMD] Listening for commands on Redis channel:", REDIS_COMMANDS)
+    
+    while True:
+        try:
+            # Non-blocking get_message
+            message = pubsub.get_message(ignore_subscribe_messages=True, timeout=0.1)
+            if message:
+                data = json.loads(message['data'])
+                cmd = data.get("cmd")
+                
+                if cmd == "scan":
+                    print("[CMD] Processing BLE Scan Request...")
+                    # return_adv=True returns a dict mapping address to (BLEDevice, AdvertisementData)
+                    devices_dict = await BleakScanner.discover(timeout=5.0, return_adv=True)
+                    found = []
+                    for addr, (d, adv) in devices_dict.items():
+                        if d.name and "SoterCare" in d.name:
+                            found.append({"name": d.name, "address": d.address, "rssi": adv.rssi})
+                    
+                    response = {"cmd": "scan_result", "devices": found}
+                    r_async.publish(REDIS_RESPONSES, json.dumps(response))
+                    print(f"[CMD] Scan complete. Found {len(found)} devices.")
+                
+                elif cmd == "configure":
+                    print(f"[CMD] Processing Configure Request for {data.get('address')}")
+                    addr = data.get("address")
+                    ssid = data.get("ssid")
+                    password = data.get("password")
+                    ip = data.get("ip")
+                    
+                    if not all([addr, ssid, password, ip]):
+                        r_async.publish(REDIS_RESPONSES, json.dumps({"cmd": "configure_result", "status": "error", "message": "Missing parameters"}))
+                        continue
+                        
+                    try:
+                        async with BleakClient(addr, timeout=10.0) as cfg_client:
+                            payload = json.dumps({"ssid": ssid, "pass": password, "ip": ip})
+                            try:
+                                await cfg_client.write_gatt_char(BLE_RX_UUID, payload.encode("utf-8"))
+                                print(f"[CMD] Successfully sent configuration to {addr}")
+                            except Exception as write_err:
+                                # The node is programmed to instantly ESP.restart() when it gets credentials.
+                                # This abruptly kills the BLE connection, causing Windows/Bleak to throw
+                                # a disconnection error (like WinError -2147023673 or BleakError).
+                                # If it fails *during* or immediately *after* write, it actually succeeded!
+                                print(f"[CMD] Note: Disconnected during write (expected due to reboot). {write_err}")
+                                
+                            r_async.publish(REDIS_RESPONSES, json.dumps({"cmd": "configure_result", "status": "success"}))
+                            
+                            # Save last configured device
+                            with open("last_device.json", "w") as f:
+                                json.dump({"address": addr, "timestamp": time.time()}, f)
+                    except Exception as e:
+                        print(f"[CMD] Configuration failed to connect: {e}")
+                        r_async.publish(REDIS_RESPONSES, json.dumps({"cmd": "configure_result", "status": "error", "message": "Failed to connect or send data."}))
+
+            await asyncio.sleep(0.1) # Yield to event loop
+        except Exception as e:
+            print(f"[CMD] Command listener error: {e}")
+            await asyncio.sleep(1.0)
 
 
 # ── Pipeline Thread: IMU → FallDetector + GaitAI → Redis ────────────────────
@@ -341,8 +433,8 @@ if __name__ == "__main__":
     print(f"[MAIN] Pipeline thread started.")
 
     async def main():
-        # BLE watchdog runs as async task in main event loop
-        ble = asyncio.create_task(ble_task())
+        ble_watchdog = asyncio.create_task(ble_task())
+        cmd_task = asyncio.create_task(command_listener_task())
 
         # Status reporter
         async def status_loop():
@@ -373,7 +465,7 @@ if __name__ == "__main__":
                 if pipe_hz < 40 and udp_hz >= 40:
                     print(f"  [WARN] Pipeline bottleneck: {udp_hz}Hz in, {pipe_hz}Hz to Redis")
 
-        await asyncio.gather(ble, status_loop())
+        await asyncio.gather(ble_watchdog, cmd_task, status_loop())
 
     try:
         asyncio.run(main())

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { io } from "socket.io-client";
+import SettingsModal from "./components/SettingsModal";
 
 const SOCKET_URL = "http://localhost:5000";
 const MAX_EVENTS = 60;
@@ -15,6 +16,7 @@ if ("speechSynthesis" in window) {
 
 // ── Medical Audio Engine ───────────────────────────────────────────────────────
 let audioCtx = null;
+let globalVolume = 1.0; // Exported for the playSiren function context
 
 function playSiren() {
   try {
@@ -35,7 +37,7 @@ function playSiren() {
     osc.frequency.setValueAtTime(600, audioCtx.currentTime + 0.5); // Low pitch
 
     // Make it loud but avoid clipping. Loops for 2 seconds.
-    gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.5 * globalVolume, audioCtx.currentTime);
 
     osc.start();
     osc.stop(audioCtx.currentTime + 2); // Play for 2 seconds
@@ -80,7 +82,7 @@ function speakEvent(text, priority = false) {
 
     utterance.pitch = 1.1;
     utterance.rate = 1.0;
-    utterance.volume = 1.0;
+    utterance.volume = globalVolume;
 
     // Safety fallback: if it hangs, force cancel after 10 seconds
     utterance.onend = () => {};
@@ -276,6 +278,21 @@ const Icon = {
       <polyline points="12 6 12 12 16 14" />
     </svg>
   ),
+  Settings: () => (
+    <svg 
+      width="24" 
+      height="24" 
+      viewBox="0 0 24 24" 
+      fill="none" 
+      stroke="currentColor" 
+      strokeWidth="2" 
+      strokeLinecap="round" 
+      strokeLinejoin="round"
+    >
+      <circle cx="12" cy="12" r="3"></circle>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+    </svg>
+  )
 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -495,6 +512,35 @@ export default function App() {
   const [online, setOnline] = useState(false); // true = receiving live data
   const [gwConnected, setGwConnected] = useState(false);
   const [audioUnlocked, setAudioUnlocked] = useState(false);
+
+  // Settings State
+  const [showSettings, setShowSettings] = useState(false);
+  const [volume, setVolume] = useState(1.0);
+  const [tempUnit, setTempUnit] = useState("C");
+  const [currentDevice, setCurrentDevice] = useState(null);
+  const [localIp, setLocalIp] = useState("192.168.");
+
+  useEffect(() => {
+    globalVolume = volume;
+  }, [volume]);
+
+  // Fetch current device on mount and when settings open
+  const fetchCurrentDevice = async () => {
+    try {
+      const res = await fetch("http://localhost:5000/api/status");
+      const data = await res.json();
+      if (data.status === "ok") {
+        if (data.last_device) setCurrentDevice(data.last_device);
+        if (data.local_ip) setLocalIp(data.local_ip);
+      }
+    } catch (e) {
+      console.warn("Failed to fetch device status", e);
+    }
+  };
+
+  useEffect(() => {
+    fetchCurrentDevice();
+  }, []);
 
   // Refs for boot sequence without dependency loops
   const gwRef = useRef(false);
@@ -741,15 +787,9 @@ export default function App() {
 
       // Prevent Redis history replay from faking an online status
       const packetAgeMs = Math.abs(Date.now() - parseFloat(d.ts) * 1000);
-      const isHistorical = packetAgeMs > 10000; // Older than 10s
+      const isHistorical = packetAgeMs > 15000; // Older than 15s
 
       if (!isHistorical) {
-        hzRef.current++;
-        lastDataTime.current = Date.now();
-      } else {
-        // Fallback in case device clock isn't 100% synced with Pi clock:
-        // If a packet comes in via WebSocket, we ALWAYS consider the gateway "Alive"
-        // to prevent offline locking if time drifts.
         hzRef.current++;
         lastDataTime.current = Date.now();
       }
@@ -917,8 +957,12 @@ export default function App() {
     return () => socket.disconnect();
   }, [addEvent]);
 
-  const patientTemp = data ? parseFloat(data.temp).toFixed(1) : null;
-  const roomTemp = data ? parseFloat(data.ambientTemp).toFixed(1) : null;
+  const patientTempRaw = data ? parseFloat(data.temp) : null;
+  const roomTempRaw = data ? parseFloat(data.ambientTemp) : null;
+  
+  const patientTemp = patientTempRaw ? (tempUnit === "F" ? ((patientTempRaw * 9/5) + 32).toFixed(1) : patientTempRaw.toFixed(1)) : null;
+  const roomTemp = roomTempRaw ? (tempUnit === "F" ? ((roomTempRaw * 9/5) + 32).toFixed(1) : roomTempRaw.toFixed(1)) : null;
+
   const moisture = data ? parseInt(data.moisture) : null;
   const dimmed = !online ? { opacity: 0.45, pointerEvents: "none" } : {};
 
@@ -1005,6 +1049,16 @@ export default function App() {
             IMU {online ? hz : 0} Hz
           </div>
           <ConnChip source={online ? data?.source : null} />
+          <button 
+            className="settings-btn icon-btn" 
+            onClick={() => {
+              fetchCurrentDevice();
+              setShowSettings(true);
+            }}
+            title="Settings"
+          >
+            <Icon.Settings />
+          </button>
         </div>
       </div>
 
@@ -1014,11 +1068,11 @@ export default function App() {
         <div className="left" style={dimmed}>
           <MetricCard
             icon={<Icon.Temp />}
-            value={patientTemp ? `${patientTemp}°C` : "—"}
+            value={patientTemp ? `${patientTemp}°${tempUnit}` : "—"}
             label={
               !online
                 ? "No Data"
-                : patientTemp > 38.5
+                : patientTempRaw > 38.5
                   ? "Elevated Temp"
                   : "Patient Skin"
             }
@@ -1026,7 +1080,7 @@ export default function App() {
             extra={
               online &&
               roomTemp && (
-                <div className="room-temp-badge">Room: {roomTemp}°C</div>
+                <div className="room-temp-badge">Room: {roomTemp}°{tempUnit}</div>
               )
             }
           />
@@ -1053,6 +1107,19 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {showSettings && (
+        <SettingsModal 
+          onClose={() => setShowSettings(false)}
+          volume={volume}
+          setVolume={setVolume}
+          tempUnit={tempUnit}
+          setTempUnit={setTempUnit}
+          currentDevice={currentDevice}
+          setCurrentDevice={setCurrentDevice}
+          localIp={localIp}
+        />
+      )}
     </div>
   );
 }
