@@ -16,6 +16,7 @@ export default function SettingsModal({
   const [selectedDevice, setSelectedDevice] = useState(null);
   const [ssid, setSsid] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [ip, setIp] = useState(localIp || "192.168.");
   const [configureStatus, setConfigureStatus] = useState(null); // {status: 'success'|'error'|'loading', message: ''}
 
@@ -236,12 +237,31 @@ export default function SettingsModal({
                   </div>
                   <div className="input-group">
                     <label>Wi-Fi Password</label>
-                    <input
-                      type="password"
-                      placeholder="Leave blank if open"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                    />
+                    <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+                      <input
+                        type={showPassword ? "text" : "password"}
+                        placeholder="Leave blank if open"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        style={{ width: "100%", paddingRight: "45px" }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword(!showPassword)}
+                        style={{
+                          position: "absolute",
+                          right: "10px",
+                          background: "transparent",
+                          border: "none",
+                          cursor: "pointer",
+                          color: "var(--text-dim)",
+                          fontSize: "12px",
+                          fontWeight: "bold",
+                        }}
+                      >
+                        {showPassword ? "HIDE" : "SHOW"}
+                      </button>
+                    </div>
                   </div>
                   <div className="input-group">
                     <label>Gateway IP</label>
