@@ -780,7 +780,7 @@ export default function App() {
           category: "health",
           type: "danger",
           title: "Fall Detection Triggered",
-          detail: `G-total: ${parseFloat(d.gTotal ?? 0).toFixed(2)}g  ·  Temp: ${tmp.toFixed(1)} C`,
+          detail: `G-total: ${parseFloat(d.gTotal ?? 0).toFixed(2)}g`,
           time: t,
         });
 

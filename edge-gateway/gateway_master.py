@@ -244,11 +244,12 @@ def pipeline_thread():
 
 
         ax, ay, az = frame["accX"], frame["accY"], frame["accZ"]
+        gx, gy, gz = frame["gyroX"], frame["gyroY"], frame["gyroZ"]
         g_total = math.sqrt(ax**2 + ay**2 + az**2)
 
         # ── Fall Detection (two-phase state machine in fall_detector.py) ──
         # Runs on every raw frame, completely independent of gait AI.
-        fall_detected, fall_info = fd.update(ax, ay, az, frame["ts"])
+        fall_detected, fall_info = fd.update(ax, ay, az, gx, gy, gz, frame["ts"])
         fall_alert = 1 if fall_detected else 0
         if fall_detected:
             try:
