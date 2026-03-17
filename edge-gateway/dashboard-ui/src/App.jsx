@@ -514,6 +514,12 @@ export default function App() {
   const wasOnline = useRef(false); // for offline transition event
   const moistureAlertRef = useRef(0); // timestamp of last moisture alert (cooldown)
   const tempAlertRef = useRef(0); // timestamp of last temp alert (cooldown)
+  const ambientTempAlertRef = useRef(0); // cooldown for ambient temp
+  const lowHzAlertRef = useRef(0); // cooldown for low Hz
+  const weakSignalAlertRef = useRef(0); // cooldown for weak signal
+  const hypothermiaAlertRef = useRef(0); // cooldown for hypothermia
+  const stillnessAlertRef = useRef(0); // timestamp for stillness start
+  const stillnessTriggeredRef = useRef(false); // flag to prevent spamming
   const bootSuccess = useRef(false);
 
   // Explicit unlock via UI banner (100% reliable for background tasks)
@@ -609,7 +615,56 @@ export default function App() {
           ].slice(0, MAX_EVENTS),
         );
       } else if (nowOnline && !wasOnline.current) {
+        // Just came online
         wasOnline.current = true;
+        // The source and RSSI will be captured from the next sensor_update
+        // and we'll handle the "Online" event there where we have data.
+        // Or we can do it here if we have last known data.
+      }
+
+      // ── New Watchdog Alerts ─────────────────────────────────────────────
+      const now = Date.now();
+
+      // 1. Low Data Rate (Hz < 40 for 5s)
+      if (nowOnline && hzRef.current > 0 && hzRef.current < 40) {
+        const last = lowHzAlertRef.current;
+        if (!last || now - last > 30_000) {
+          lowHzAlertRef.current = now;
+          setEvents((p) => [
+            {
+              category: "system",
+              type: "warning",
+              title: "Low Data Rate",
+              detail: `Node is only sending at ${hzRef.current}Hz (expected >50Hz)`,
+              time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
+            },
+            ...p,
+          ].slice(0, MAX_EVENTS));
+          speakEvent("Warning: Low data rate detected from thigh node.");
+        }
+      }
+
+      // 2. Extended Stillness (Still for > 5 min)
+      if (nowOnline && prevGait.current === "Still") {
+        if (!stillnessAlertRef.current) stillnessAlertRef.current = now;
+        const durationMin = (now - stillnessAlertRef.current) / 60_000;
+        if (durationMin >= 5 && !stillnessTriggeredRef.current) {
+          stillnessTriggeredRef.current = true;
+          setEvents((p) => [
+            {
+              category: "health",
+              type: "info",
+              title: "Extended Stillness",
+              detail: "Patient has been still for over 5 minutes",
+              time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
+            },
+            ...p,
+          ].slice(0, MAX_EVENTS));
+          speakEvent("Patient has been still for 5 minutes. Consider checking status.");
+        }
+      } else {
+        stillnessAlertRef.current = 0;
+        stillnessTriggeredRef.current = false;
       }
     }, 1000);
     return () => clearInterval(id);
@@ -779,17 +834,17 @@ export default function App() {
       // ── Connection source change (Live data only) ────────────────────────
       if (!isHistorical) {
         if (!prevSource.current && d.source) {
-          if (!booting) {
-            const label =
-              d.source === "wifi" ? `Wi-Fi — RSSI: ${d.rssi} dBm` : "BLE";
-            addEvent({
-              category: "system",
-              type: "success",
-              title: "Thigh Node Online",
-              detail: `Connected via ${d.source === "wifi" ? "Wi-Fi" : "BLE"} · ${label}`,
-              time: t,
-            });
-          }
+          // This fires when it first comes online OR after an offline period
+          const label =
+            d.source === "wifi" ? `Wi-Fi — RSSI: ${d.rssi} dBm` : "BLE";
+          addEvent({
+            category: "system",
+            type: "success",
+            title: "Thigh Node Online",
+            detail: `Connected via ${d.source === "wifi" ? "Wi-Fi" : "BLE"} · ${label}`,
+            time: t,
+          });
+          speakEvent("Thigh node is online.");
         } else if (d.source !== prevSource.current && prevSource.current) {
           const toWifi = d.source === "wifi";
           addEvent({
@@ -803,6 +858,55 @@ export default function App() {
           });
         }
         prevSource.current = d.source;
+
+        // ── Signal/Environment Status Alerts ───────────────────────────────
+        // 1. Weak Signal (RSSI < -85)
+        const rssiVal = parseInt(d.rssi);
+        if (d.source === "wifi" && rssiVal < -85) {
+          const last = weakSignalAlertRef.current;
+          if (!last || now - last > 60_000) {
+            weakSignalAlertRef.current = now;
+            addEvent({
+              category: "system",
+              type: "warning",
+              title: "Weak Signal",
+              detail: `RSSI is very low: ${rssiVal} dBm. Move gateway closer.`,
+              time: t,
+            });
+          }
+        }
+
+        // 2. Ambient Temp (Room comfort)
+        const amb = parseFloat(d.ambientTemp);
+        if (amb < 15 || amb > 35) {
+          const last = ambientTempAlertRef.current;
+          if (!last || now - last > 300_000) { // 5 min cooldown
+            ambientTempAlertRef.current = now;
+            addEvent({
+              category: "system",
+              type: "neutral",
+              title: `Room Temp ${amb > 35 ? "High" : "Low"}: ${amb.toFixed(1)}°C`,
+              detail: "Check room climate control",
+              time: t,
+            });
+          }
+        }
+
+        // 3. Hypothermia Check (Body temp < 34)
+        if (tmp < 34 && tmp > 20) { // > 20 to avoid sensor error/off-body
+          const last = hypothermiaAlertRef.current;
+          if (!last || now - last > 120_000) {
+            hypothermiaAlertRef.current = now;
+            addEvent({
+              category: "health",
+              type: "danger",
+              title: `Low Body Temp: ${tmp.toFixed(1)}°C`,
+              detail: "Patient may be hypothermic — check immediately",
+              time: t,
+            });
+            speakEvent("Warning: Low body temperature detected.");
+          }
+        }
       }
 
       // ── Gait label change ─────────────────────────────────────────────────
