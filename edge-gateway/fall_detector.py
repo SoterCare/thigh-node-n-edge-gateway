@@ -32,18 +32,22 @@ import math
 import logging
 import collections
 from enum import Enum, auto
+from typing import Optional, Tuple
 
 log = logging.getLogger("fall_detector")
 
 
 # ── Tunable parameters ─────────────────────────────────────────────────────────
-IMPACT_THRESHOLD      = 3.0    # g   — minimum spike to enter IMPACT phase
+# ── Tunable parameters (Refined for Thigh-based detection) ───────────────
+IMPACT_THRESHOLD      = 2.5    # g   — lowered from 3.0 to catch "slump" falls
 IMPACT_MAX            = 12.0   # g   — above this = sensor error, skip
+FREE_FALL_THRESHOLD   = 0.5    # g   — weightless state before impact
 QUIET_LOW             = 0.6    # g   — below this = sensor off-body / error
-QUIET_HIGH            = 1.5    # g   — above this = continued activity, not quiet
-QUIET_DURATION        = 1.2    # s   — how long quiet must be sustained
-IMPACT_TO_QUIET_WINDOW = 2.5   # s   — max time from impact to start of quiet
+QUIET_HIGH            = 1.4    # g   — lowered for stricter quiet-period
+QUIET_DURATION        = 1.0    # s   — shortened from 1.2 for faster detection
+IMPACT_TO_QUIET_WINDOW = 2.0   # s   — tight window for valid fall
 FALL_COOLDOWN         = 30.0   # s   — no repeat alert for this long
+POST_IMPACT_STABILITY  = 0.35  # s   — window to compute stable "quiet" vector
 
 # ── State machine states ───────────────────────────────────────────────────────
 class FallState(Enum):
@@ -75,8 +79,8 @@ class FallDetector:
 
         # History and Kinematics
         self._history       = collections.deque(maxlen=75) # 1.5s at 50Hz
-        self._pre_impact_vec= None
-        self._free_fall_seen= False
+        self._pre_impact_vec: Optional[Tuple[float, float, float]] = None
+        self._free_fall_seen: bool = False
 
         # Cooldown
         self._last_alert_t  : float = 0.0
@@ -125,20 +129,22 @@ class FallDetector:
             # Analyze pre-impact history
             history_list = list(self._history)
             
-            # 1. Free-fall check: any sample < 0.6g in history
-            self._free_fall_seen = any(item[3] < 0.6 for item in history_list)
+            # 1. Free-fall check: any sample below the threshold in recent history
+            self._free_fall_seen = any(item[3] < FREE_FALL_THRESHOLD for item in history_list)
             
-            # 2. Compute pre-impact vector (average of oldest half of history)
-            if len(history_list) > 10:
-                base_samples = history_list[:len(history_list)//2]
-                avg_ax = sum(item[0] for item in base_samples) / len(base_samples)
-                avg_ay = sum(item[1] for item in base_samples) / len(base_samples)
-                avg_az = sum(item[2] for item in base_samples) / len(base_samples)
+            # 2. Compute pre-impact baseline orientation
+            # We look at the oldest 20-40% of the buffer to get a stable pre-fall baseline
+            if len(history_list) > 20:
+                baseline_end = int(len(history_list) * 0.4)
+                baseline_samples = [history_list[i] for i in range(baseline_end)]
+                avg_ax = sum(item[0] for item in baseline_samples) / len(baseline_samples)
+                avg_ay = sum(item[1] for item in baseline_samples) / len(baseline_samples)
+                avg_az = sum(item[2] for item in baseline_samples) / len(baseline_samples)
                 self._pre_impact_vec = (avg_ax, avg_ay, avg_az)
             else:
                 self._pre_impact_vec = (ax, ay, az)
                 
-            log.debug(f"[FallDetector] Impact detected: {g:.2f}g. Free-fall seen: {self._free_fall_seen}")
+            log.debug(f"[FallDetector] Impact {g:.2f}g. FreeFall: {self._free_fall_seen}")
         return False, ""
 
     def _impact_phase(self, ax: float, ay: float, az: float, g: float, ts: float) -> tuple[bool, str]:
@@ -198,9 +204,10 @@ class FallDetector:
             return False, ""
 
         # ── Posture angle check ────────────────────────────────────────────
-        if self._pre_impact_vec:
-            v1 = self._pre_impact_vec
-            v2 = post_vec
+        p_vec = self._pre_impact_vec
+        if p_vec is not None:
+            v1: Tuple[float, float, float] = p_vec
+            v2: Tuple[float, float, float] = post_vec
             mag1 = math.sqrt(v1[0]**2 + v1[1]**2 + v1[2]**2)
             mag2 = math.sqrt(v2[0]**2 + v2[1]**2 + v2[2]**2)
             if mag1 > 0 and mag2 > 0:
@@ -245,7 +252,8 @@ class FallDetector:
     # ── Diagnostics ────────────────────────────────────────────────────────────
     @property
     def state(self) -> str:
-        return self._state.name
+        res: str = str(self._state.name)
+        return res
 
     def reset(self):
         """Force-reset to IDLE (e.g. on reconnect)."""

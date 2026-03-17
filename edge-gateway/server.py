@@ -9,9 +9,9 @@ Vite dashboard at http://localhost:5173 via WebSocket.
 import threading
 import time
 
-import redis as redis_lib
-from flask import Flask, jsonify
-from flask_socketio import SocketIO, emit
+import redis as redis_lib # type: ignore
+from flask import Flask, jsonify # type: ignore
+from flask_socketio import SocketIO, emit # type: ignore
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = "sotercare-secret"

@@ -6,8 +6,9 @@ import time
 import os
 import threading
 import queue
-import customtkinter as ctk
-from bleak import BleakScanner, BleakClient
+from typing import Any, Dict, cast
+import customtkinter as ctk # type: ignore
+from bleak import BleakScanner, BleakClient # type: ignore
 
 # ================= CONFIGURATION =================
 BLE_DEVICE_NAME = "D01 Prototype 1.0v SoterCare"
@@ -16,7 +17,7 @@ TX_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 NODE_WRAPPER_SCRIPT = os.path.join(os.path.dirname(__file__), "run-inference.js")
 
 # Thread-safe queue for UI updates
-ui_queue = queue.Queue()
+ui_queue: queue.Queue[Dict[str, Any]] = queue.Queue()
 
 def get_model_info():
     ui_queue.put({'type': 'status', 'text': 'Fetching model requirements...', 'color': 'yellow'})
@@ -57,16 +58,18 @@ class InferenceAppBackend:
                 ["node", NODE_WRAPPER_SCRIPT, features_str],
                 capture_output=True, text=True, check=False
             )
-            inference_time = (time.time() - start_time) * 1000
+            assert result.stdout is not None
+            inference_time: float = (time.time() - start_time) * 1000
             
             if not result.stdout.strip():
                  ui_queue.put({'type': 'error', 'text': f"Node failed (No Output): {result.stderr}"})
                  return
 
-            stdout_str = result.stdout.strip()
-            json_start = stdout_str.find('{')
-            if json_start != -1:
-                json_str = stdout_str[json_start:]
+            stdout_str: str = str(result.stdout).strip()
+            json_start_idx: int = int(stdout_str.find('{'))
+            if json_start_idx != -1:
+                # Use cast to satisfy slice indexing
+                json_str: str = cast(str, stdout_str[json_start_idx:])
             else:
                 json_str = stdout_str
                 
@@ -97,7 +100,11 @@ class InferenceAppBackend:
             })
             
         except json.JSONDecodeError:
-            ui_queue.put({'type': 'error', 'text': f"JSON Parse Failed. Output:\n{result.stdout[:100]}"})
+            out_raw = result.stdout if result else ""
+            out_str: str = str(out_raw)
+            # Use explicit index list or slice in a way that doesn't trigger "Cannot index into str"
+            summary_str = "".join([out_str[i] for i in range(min(100, len(out_str)))])
+            ui_queue.put({'type': 'error', 'text': f"JSON Parse Failed. Output:\n{summary_str}"})
         except Exception as e:
             ui_queue.put({'type': 'error', 'text': f"Inference Exception: {e}"})
 

@@ -18,10 +18,11 @@ import socket
 import subprocess
 import threading
 import time
+from typing import Any, Dict, List, cast
 
-import redis
-from bleak import BleakClient, BleakScanner
-from fall_detector import FallDetector
+import redis # type: ignore
+from bleak import BleakClient, BleakScanner # type: ignore
+from fall_detector import FallDetector # type: ignore
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 UDP_HOST        = "0.0.0.0"
@@ -45,11 +46,15 @@ udp_ever_seen  = False
 connection_mode = "searching"
 _state_lock    = threading.Lock()
 
-# ── Hz diagnostic counters (thread-safe via lock) ─────────────────────────────
+# ── Hz diagnostic counters (class-based to avoid global scope issues) ──
+class DiagCounters:
+    def __init__(self):
+        self.udp_rx_count = 0    # Frames received from firmware (UDP or BLE)
+        self.redis_wr_count = 0   # Frames actually written to Redis
+        self.drop_count = 0       # Frames dropped by 20ms gate
+
+_diag = DiagCounters()
 _diag_lock      = threading.Lock()
-_udp_rx_count   = 0    # Frames received from firmware (UDP or BLE)
-_redis_wr_count = 0    # Frames actually written to Redis
-_drop_count     = 0    # Frames dropped by 20ms gate
 
 
 def set_state(mode: str, ts: float | None = None):
@@ -119,8 +124,7 @@ def udp_listener_thread():
             if frame:
                 set_state("wifi", ts=time.time())
                 with _diag_lock:
-                    global _udp_rx_count
-                    _udp_rx_count += 1
+                    _diag.udp_rx_count += 1
                 try:
                     frame_q.put_nowait(frame)
                 except queue.Full:
@@ -148,10 +152,11 @@ async def ble_task():
     while True:
         if wifi_is_alive():
             # UDP is healthy — ensure BLE is disconnected
-            if ble_active and client and client.is_connected:
+            c = client
+            if ble_active and c is not None and c.is_connected:
                 print("[BLE] UDP active. Disconnecting BLE.")
                 try:
-                    await client.disconnect()
+                    await c.disconnect()
                 except Exception:
                     pass
                 client = None
@@ -199,7 +204,8 @@ async def ble_task():
         await asyncio.sleep(0.5)
 
         # If BLE client dropped unexpectedly, reset
-        if ble_active and client and not client.is_connected:
+        c_drop = client
+        if ble_active and c_drop is not None and not c_drop.is_connected:
             print("[BLE] Connection dropped. Will reconnect.")
             client = None
             ble_active = False
@@ -216,14 +222,14 @@ def pipeline_thread():
     # ── Gait AI: Edge Impulse model (optional) ────────────────────────────
     runner = None
     try:
-        from edge_impulse_linux.runner import ImpulseRunner
+        from edge_impulse_linux.runner import ImpulseRunner # type: ignore
         runner = ImpulseRunner(MODEL_PATH)
         info = runner.init()
         print(f"[AI] Model loaded: {info['project']['name']}")
     except Exception as e:
         print(f"[AI] Model unavailable ({e}). Gait = N/A")
 
-    imu_window = []
+    imu_window: List[List[float]] = []
 
     while True:
         try:
@@ -231,11 +237,10 @@ def pipeline_thread():
         except queue.Empty:
             continue
 
-        # No rate limiting — firmware is hardware-capped at ~50Hz.
-        # Just count and write every valid frame to Redis.
+        # with _diag_lock:
+        #     _diag.redis_wr_count += 1
         with _diag_lock:
-            global _redis_wr_count
-            _redis_wr_count += 1
+            _diag.redis_wr_count += 1
 
 
         ax, ay, az = frame["accX"], frame["accY"], frame["accZ"]
@@ -257,32 +262,44 @@ def pipeline_thread():
 
         # AI inference
         gait_label = "N/A"
-        if runner:
+        curr_runner = runner
+        if curr_runner is not None:
+            # Narrow imu_window to List[List[float]] for the analyzer
+            win_ref = cast(List[List[float]], imu_window)
+            
             # Append all 6 axes for flexibility
             gx, gy, gz = frame["gyroX"], frame["gyroY"], frame["gyroZ"]
-            imu_window.append([ax, ay, az, gx, gy, gz])
+            win_ref.append([ax, ay, az, gx, gy, gz])
             
             # Auto-detect if model expects 3-axis or 6-axis
-            feat_count = getattr(runner, "get_input_features_count", lambda: 150)()
-            samples = 125 # Default 2.5s @ 50Hz
+            default_feat = 150
+            feat_func = getattr(curr_runner, "get_input_features_count", None)
+            feat_count = int(feat_func() if feat_func else default_feat)
+            
             axes = 3
             if feat_count >= 750: # Likely 6-axis (125 * 6)
                 axes = 6
             
-            win = feat_count // axes
-            if len(imu_window) >= win:
+            win = int(feat_count // axes)
+            if len(win_ref) >= win:
                 try:
                     # Filter window to match model axes (Acc only or Acc+Gyro)
-                    window_subset = [s[:axes] for s in imu_window[-win:]]
-                    features = [v for s in window_subset for v in s]
+                    # Use explicit indexing/range to avoid slice ambiguity
+                    w_start = len(win_ref) - win
+                    window_subset = [[win_ref[i][a] for a in range(axes)] for i in range(w_start, len(win_ref))]
+                    features = [float(v) for s in window_subset for v in s]
                     
-                    res = runner.classify({"features": features})
+                    res_raw = curr_runner.classify({"features": features})
+                    res = cast(Dict[str, Any], res_raw)
                     cls = res.get("result", {}).get("classification", {})
                     if cls:
-                        gait_label = max(cls, key=cls.get)
+                        gait_label = str(max(cls, key=cls.get))
                 except Exception as e:
                     print(f"[AI] Inference error: {e}")
-                imu_window = imu_window[-win:]
+                
+                # Maintain the window by keeping the last 'win' samples
+                w_keep_start = len(win_ref) - win
+                imu_window = [win_ref[i] for i in range(max(0, w_keep_start), len(win_ref))]
 
         # Write to Redis
         fields = {
@@ -335,10 +352,12 @@ if __name__ == "__main__":
                 q_size = frame_q.qsize()
                 # Snapshot and reset Hz counters
                 with _diag_lock:
-                    udp_hz  = _udp_rx_count  // 5
-                    pipe_hz = _redis_wr_count // 5
-                    drops   = _drop_count
-                    globals().update(_udp_rx_count=0, _redis_wr_count=0, _drop_count=0)
+                    udp_hz  = _diag.udp_rx_count  // 5
+                    pipe_hz = _diag.redis_wr_count // 5
+                    drops   = _diag.drop_count
+                    _diag.udp_rx_count = 0
+                    _diag.redis_wr_count = 0
+                    _diag.drop_count = 0
                 status = (
                     f"[STATUS] Mode={mode.upper():10s}  "
                     f"UDP_RX={udp_hz:3d}Hz  "
