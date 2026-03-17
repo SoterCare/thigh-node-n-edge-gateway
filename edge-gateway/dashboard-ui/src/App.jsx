@@ -517,7 +517,6 @@ export default function App() {
   const ambientTempAlertRef = useRef(0); // cooldown for ambient temp
   const lowHzAlertRef = useRef(0); // cooldown for low Hz
   const weakSignalAlertRef = useRef(0); // cooldown for weak signal
-  const hypothermiaAlertRef = useRef(0); // cooldown for hypothermia
   const stillnessAlertRef = useRef(0); // timestamp for stillness start
   const stillnessTriggeredRef = useRef(false); // flag to prevent spamming
   const bootSuccess = useRef(false);
@@ -889,22 +888,6 @@ export default function App() {
               detail: "Check room climate control",
               time: t,
             });
-          }
-        }
-
-        // 3. Hypothermia Check (Body temp < 34)
-        if (tmp < 34 && tmp > 20) { // > 20 to avoid sensor error/off-body
-          const last = hypothermiaAlertRef.current;
-          if (!last || now - last > 120_000) {
-            hypothermiaAlertRef.current = now;
-            addEvent({
-              category: "health",
-              type: "danger",
-              title: `Low Body Temp: ${tmp.toFixed(1)}°C`,
-              detail: "Patient may be hypothermic — check immediately",
-              time: t,
-            });
-            speakEvent("Warning: Low body temperature detected.");
           }
         }
       }
