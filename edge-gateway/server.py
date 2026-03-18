@@ -69,11 +69,13 @@ def api_status():
             pass
             
         # Get the host's local IP to auto-fill dashboard configuration
-        local_ip = "192.168.1.something"
+        local_ip = ""
         try:
             import socket
-            hostname = socket.gethostname()
-            local_ip = socket.gethostbyname(hostname)
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
         except Exception:
             pass
             
@@ -156,6 +158,41 @@ def api_reset():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+@app.route("/api/wifi-current")
+def api_wifi_current():
+    """Extracts current active Wi-Fi SSID and Gateway IP."""
+    import subprocess
+    import socket
+    try:
+        # Get active wifi details
+        result = subprocess.run(["sudo", "nmcli", "-t", "-f", "active,ssid", "dev", "wifi"], capture_output=True, text=True, check=False)
+        output = result.stdout
+        
+        ssid = ""
+        for line in output.split('\n'):
+            line = line.strip()
+            # The format is active:ssid, e.g. "yes:SLT-Fiber-2.4G_Senon"
+            if line.startswith('yes:'):
+                ssidParts = line.split(':', 1)
+                if len(ssidParts) > 1:
+                    ssid = ssidParts[1].strip()
+                break
+                
+        # Get local IP
+        local_ip = "192.168.1.something"
+        try:
+            # Using a dummy socket connection to get the actual routed IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            pass
+                
+        return jsonify({"status": "ok", "ssid": ssid, "ip": local_ip})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 @socketio.on("connect")
 def on_connect():
     print("[Server] Client connected.")
@@ -177,4 +214,4 @@ if __name__ == "__main__":
     t = threading.Thread(target=redis_tail, daemon=True)
     t.start()
     print("[Server] Starting on http://0.0.0.0:5000")
-    socketio.run(app, host="0.0.0.0", port=5000, debug=False, use_reloader=False)
+    socketio.run(app, host="0.0.0.0", port=5000, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)

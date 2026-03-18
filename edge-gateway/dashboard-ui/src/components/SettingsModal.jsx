@@ -29,6 +29,26 @@ export default function SettingsModal({
     return () => window.removeEventListener("keydown", handleEsc);
   }, [onClose]);
 
+  // Fetch current WiFi info when entering the connection tab once
+  useEffect(() => {
+    // Only fetch if ssid is empty and ip is still the default fallback
+    if (activeTab === "connection" && !ssid && (ip === "192.168." || ip === localIp || !ip)) {
+      const fetchWifi = async () => {
+        try {
+          const res = await fetch("http://localhost:5000/api/wifi-current");
+          const data = await res.json();
+          if (data.status === "ok") {
+            if (data.ssid) setSsid(data.ssid);
+            if (data.ip) setIp(data.ip);
+          }
+        } catch (e) {
+          console.error("Failed to fetch active Wi-Fi info", e);
+        }
+      };
+      fetchWifi();
+    }
+  }, [activeTab, ssid, ip, localIp]);
+
   const handleScan = async () => {
     setScanning(true);
     setDevices([]);

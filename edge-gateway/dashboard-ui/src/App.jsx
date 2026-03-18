@@ -5,12 +5,8 @@ import SettingsModal from "./components/SettingsModal";
 const SOCKET_URL = "http://localhost:5000";
 const MAX_EVENTS = 60;
 
-// Warm up the speech synthesis API so voice lists are ready immediately
+// Warm up the speech synthesis API so voices start loading
 if ("speechSynthesis" in window) {
-  // Fire an empty, silent utterance on load to wake up the speech engine
-  const w = new SpeechSynthesisUtterance("");
-  w.volume = 0;
-  window.speechSynthesis.speak(w);
   window.speechSynthesis.getVoices();
 }
 
@@ -489,9 +485,9 @@ export default function App() {
   const [data, setData] = useState(null);
   const [events, setEvents] = useState(() => {
     // If this is a fresh boot (no session key), clear persistent logs
-    if (!sessionStorage.getItem("sotercare_booted")) {
+    if (!sessionStorage.getItem("sotercare_v2_f")) {
       localStorage.removeItem("sotercare_events");
-      sessionStorage.setItem("sotercare_booted", "true");
+      sessionStorage.setItem("sotercare_v2_f", "true");
       return [];
     }
     const saved = localStorage.getItem("sotercare_events");
@@ -565,6 +561,7 @@ export default function App() {
   const weakSignalAlertRef = useRef(0); // cooldown for weak signal
   const stillnessAlertRef = useRef(0); // timestamp for stillness start
   const stillnessTriggeredRef = useRef(false); // flag to prevent spamming
+  const gaitAlertCooldownRef = useRef(0); // cooldown for standing/sitting alerts
   const bootSuccess = useRef(false);
 
   // Explicit unlock via UI banner (100% reliable for background tasks)
@@ -689,7 +686,8 @@ export default function App() {
         }
       }
 
-      // 2. Extended Stillness (Still for > 5 min)
+      // 2. Extended Stillness Disabled (Gait filter)
+      /*
       if (nowOnline && prevGait.current === "Still") {
         if (!stillnessAlertRef.current) stillnessAlertRef.current = now;
         const durationMin = (now - stillnessAlertRef.current) / 60_000;
@@ -711,6 +709,9 @@ export default function App() {
         stillnessAlertRef.current = 0;
         stillnessTriggeredRef.current = false;
       }
+      */
+      stillnessAlertRef.current = 0;
+      stillnessTriggeredRef.current = false;
     }, 1000);
     return () => clearInterval(id);
   }, []); // no addEvent dependency — uses setEvents directly
@@ -932,24 +933,31 @@ export default function App() {
         }
       }
 
-      // ── Gait label change ─────────────────────────────────────────────────
+      // ── Gait label change (Timeline alerts for Standing/Sitting only) ───
       const g = d.gaitLabel && d.gaitLabel !== "N/A" ? d.gaitLabel : null;
       if (g && g !== prevGait.current) {
         prevGait.current = g;
-        addEvent({
-          category: "health",
-          type: "info",
-          title: `Gait: ${g}`,
-          detail: `G-total: ${parseFloat(d.gTotal ?? 0).toFixed(2)}g`,
-          time: t,
-        });
-
-        if (g === "Risky Movement") {
-          playSiren();
-          speakEvent(
-            "Risky movement detected. Please check patient immediately.",
-            true,
-          );
+        
+        // ONLY alert for these specific transitions as requested
+        // AND ignore historical replay packets
+        if (!isHistorical && g) {
+          const norm = g.toLowerCase().replace(/_/g, " ").replace(/-/g, " ").trim();
+          if (norm === "standing up" || norm === "sitting down") {
+            const lastGaitAlert = gaitAlertCooldownRef.current;
+            // 5 second cooldown for the same movement type to prevent "chitter"
+            if (!lastGaitAlert || now - lastGaitAlert > 5000) {
+              gaitAlertCooldownRef.current = now;
+              const pretty = norm === "standing up" ? "Standing Up" : "Sitting Down";
+              addEvent({
+                category: "health",
+                type: "info",
+                title: `Movement: ${pretty}`,
+                detail: `Patient is ${norm}`,
+                time: t,
+              });
+              speakEvent(`Patient is ${norm}.`);
+            }
+          }
         }
       }
     });

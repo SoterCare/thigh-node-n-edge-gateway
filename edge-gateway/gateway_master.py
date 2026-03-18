@@ -22,6 +22,7 @@ import json
 from typing import Any, Dict, List, cast
 
 import redis # type: ignore
+from collections import deque, Counter
 from bleak import BleakClient, BleakScanner # type: ignore
 from fall_detector import FallDetector # type: ignore
 
@@ -304,6 +305,36 @@ async def command_listener_task():
             await asyncio.sleep(1.0)
 
 
+# ── Gait Smoother ─────────────────────────────────────────────────────────────
+class GaitSmoother:
+    """
+    Stabilizes gait labels using a sliding window majority vote.
+    Prevents flickering and redundant alerts on the dashboard.
+    """
+    def __init__(self, window_size=15):
+        self.window = deque(maxlen=window_size)
+        self.last_stable_label = "N/A"
+
+    def update(self, new_label: str) -> str:
+        if not new_label or new_label == "N/A":
+            return self.last_stable_label
+
+        self.window.append(new_label)
+        
+        # Only vote if window is full enough to be representative
+        if len(self.window) < (self.window.maxlen // 2):
+            return self.last_stable_label
+
+        # Majority vote
+        counts = Counter(self.window)
+        most_common, count = counts.most_common(1)[0]
+        
+        # Require 60% confidence to switch labels
+        if count >= (len(self.window) * 0.6):
+            self.last_stable_label = most_common
+            
+        return self.last_stable_label
+
 # ── Pipeline Thread: IMU → FallDetector + GaitAI → Redis ────────────────────
 def pipeline_thread():
     r = redis.Redis(host="localhost", port=6379, decode_responses=True)
@@ -321,6 +352,7 @@ def pipeline_thread():
     except Exception as e:
         print(f"[AI] Model unavailable ({e}). Gait = N/A")
 
+    smoother = GaitSmoother(window_size=20) # Approx 0.4s window at 50Hz
     imu_window: List[List[float]] = []
 
     while True:
@@ -364,35 +396,36 @@ def pipeline_thread():
             gx, gy, gz = frame["gyroX"], frame["gyroY"], frame["gyroZ"]
             win_ref.append([ax, ay, az, gx, gy, gz])
             
-            # Auto-detect if model expects 3-axis or 6-axis
-            default_feat = 150
-            feat_func = getattr(curr_runner, "get_input_features_count", None)
-            feat_count = int(feat_func() if feat_func else default_feat)
+            # Hard-coded for the specific SoterCare 6-axis model (125 samples * 6 axes)
+            # The previous auto-detect was failing in back-compat modes.
+            feat_count = 750
+            axes = 6
+            win = 125
             
-            axes = 3
-            if feat_count >= 750: # Likely 6-axis (125 * 6)
-                axes = 6
-            
-            win = int(feat_count // axes)
             if len(win_ref) >= win:
                 try:
                     # Filter window to match model axes (Acc only or Acc+Gyro)
                     # Use explicit indexing/range to avoid slice ambiguity
+                    # Filter window to match model axes (Acc only or Acc+Gyro)
+                    # Use explicit indexing/range to ensure we get a flat list of floats
                     w_start = len(win_ref) - win
-                    window_subset = [[win_ref[i][a] for a in range(axes)] for i in range(w_start, len(win_ref))]
-                    features = [float(v) for s in window_subset for v in s]
+                    features = []
+                    for i in range(w_start, len(win_ref)):
+                        for a in range(axes):
+                            features.append(float(win_ref[i][a]))
                     
-                    res_raw = curr_runner.classify({"features": features})
+                    # SDK expects a flat list of features, NOT a dictionary
+                    res_raw = curr_runner.classify(features)
                     res = cast(Dict[str, Any], res_raw)
                     cls = res.get("result", {}).get("classification", {})
                     if cls:
-                        gait_label = str(max(cls, key=cls.get))
+                        raw_label = str(max(cls, key=cls.get))
+                        gait_label = smoother.update(raw_label)
                 except Exception as e:
                     print(f"[AI] Inference error: {e}")
                 
-                # Maintain the window by keeping the last 'win' samples
-                w_keep_start = len(win_ref) - win
-                imu_window = [win_ref[i] for i in range(max(0, w_keep_start), len(win_ref))]
+                # Maintain the window by keeping the last 'win' samples to avoid memory leak
+                imu_window = win_ref[-win:]
 
         # Write to Redis
         fields = {

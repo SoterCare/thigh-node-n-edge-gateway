@@ -4,7 +4,7 @@
 # Run once as the desktop user (not root):  bash scripts/setup_kiosk.sh
 
 set -e
-DASHBOARD_URL="http://localhost:5000"
+DASHBOARD_URL="http://localhost:5173"
 AUTOSTART_DIR="$HOME/.config/autostart"
 
 echo "[kiosk] Installing unclutter (cursor hider)..."
@@ -42,5 +42,21 @@ Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
 EOF
+
+echo "[kiosk] Setting up PM2 startup..."
+# Ensure PM2 is running the current ecosystem and save it
+pm2 start ecosystem.config.js || pm2 restart ecosystem.config.js
+pm2 save
+
+# Generate PM2 startup script and execute it (requires sudo)
+# Note: This usually outputs a command that needs to be run.
+# We'll try to automate the standard Raspberry Pi / Linux case.
+if ! pm2 startup | grep -q "sudo env PATH"; then
+    echo "[kiosk] PM2 startup needs manual intervention. Please run the command PM2 gave you."
+else
+    STARTUP_CMD=$(pm2 startup | grep "sudo env PATH")
+    eval "$STARTUP_CMD"
+    pm2 save
+fi
 
 echo "[kiosk] Done. Reboot to apply: sudo reboot"
