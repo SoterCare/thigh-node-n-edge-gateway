@@ -1,4 +1,6 @@
-# Running your impulse using WebAssembly in Node.js
+# SoterCare Model Tester (Node.js)
+
+Running your impulse using WebAssembly in Node.js
 
 For more information see the documentation at https://docs.edgeimpulse.com/docs/through-webassembly
 

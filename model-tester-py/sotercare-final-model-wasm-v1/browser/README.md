@@ -1,4 +1,6 @@
-# Running your impulse using WebAssembly in the browser
+# SoterCare Model Tester (Browser)
+
+Running your impulse using WebAssembly in the browser
 
 For more information see the documentation at https://docs.edgeimpulse.com/docs/through-webassembly-browser
 

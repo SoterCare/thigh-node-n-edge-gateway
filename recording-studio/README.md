@@ -33,7 +33,7 @@ This repository contains the **Local Data Studio**, a desktop application design
     - Search for and install **`MPU6050_light`** by _rfetick_.
     - _Note: BLE libraries are included in the ESP32 Board support package._
 4.  **Upload**: Connect your ESP32 via USB, select the correct Board and Port, and click **Upload**.
-5.  **Monitor**: Open the Serial Monitor (115200 baud). You should see the device initializing and advertising as "D01 Prototype 1.0v SoterCare".
+5.  **Monitor**: Open the Serial Monitor (115200 baud). You should see the device initializing and advertising as "SoterCare_Studio_Node".
 
 ### 2. Python Application Setup
 
@@ -65,7 +65,7 @@ Once launched, a configuration dialog will appear:
 2.  **Select Data Save Folder**: Click the button to choose a folder where your recording files (JSON) and logs (CSV) will be saved.
 3.  **Select Device**:
     - The app will automatically scan for available BLE devices.
-    - Wait for the scan to complete and select your device (e.g., "D01 Prototype 1.0v SoterCare") from the dropdown list.
+    - Wait for the scan to complete and select your device (e.g., "SoterCare_Studio_Node") from the dropdown list.
     - If your device doesn't appear, ensure it is powered on (LED blinking Purple) and click **Refresh Devices**.
 4.  **Confirm**: Click the Confirm button to proceed to the main dashboard.
 
@@ -116,6 +116,7 @@ The ESP32 uses its onboard RGB LED to indicate status:
 | **Purple** | Blinking      | **Advertising**. Ready to connect via Bluetooth.    |
 | **Green**  | Blinking (3x) | **Connected**. Successfully paired with Python app. |
 | **Red**    | Blinking      | **Error**. Sensor initialization failed.            |
+| **White**  | Solid         | **Recording**. Data is being streamed to app.       |
 
 ---
 

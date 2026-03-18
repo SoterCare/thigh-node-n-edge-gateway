@@ -20,19 +20,28 @@ cat > "$HOME/.config/lxsession/LXDE-pi/autostart" <<EOF
 @xset s noblank
 EOF
 
-echo "[kiosk] Creating autostart entry for Chromium kiosk..."
+echo "[kiosk] Creating autostart entry for Chromium kiosk (X11)..."
 mkdir -p "$AUTOSTART_DIR"
 cat > "$AUTOSTART_DIR/sotercare-kiosk.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=SoterCare Kiosk
-Exec=bash -c "sleep 5 && chromium-browser --kiosk --disable-restore-session-state --disable-infobars --noerrdialogs --disable-session-crashed-bubble --autoplay-policy=no-user-gesture-required $DASHBOARD_URL"
+Exec=bash -c "sleep 10 && chromium-browser --kiosk --disable-restore-session-state --disable-infobars --noerrdialogs --disable-session-crashed-bubble --autoplay-policy=no-user-gesture-required $DASHBOARD_URL"
 Hidden=false
 NoDisplay=false
 X-GNOME-Autostart-enabled=true
 EOF
 
-echo "[kiosk] Creating autostart entry for unclutter..."
+echo "[kiosk] Configuring Labwc (Wayland) autostart..."
+LABWC_AUTOSTART_DIR="$HOME/.config/labwc"
+mkdir -p "$LABWC_AUTOSTART_DIR"
+cat > "$LABWC_AUTOSTART_DIR/autostart" <<EOF
+# Labwc autostart for SoterCare Kiosk
+unclutter -idle 0.1 -root &
+sleep 10 && chromium-browser --kiosk --disable-restore-session-state --disable-infobars --noerrdialogs --disable-session-crashed-bubble --autoplay-policy=no-user-gesture-required "$DASHBOARD_URL" &
+EOF
+
+echo "[kiosk] Creating autostart entry for unclutter (X11)..."
 cat > "$AUTOSTART_DIR/unclutter.desktop" <<EOF
 [Desktop Entry]
 Type=Application
@@ -54,7 +63,7 @@ pm2 save
 if ! pm2 startup | grep -q "sudo env PATH"; then
     echo "[kiosk] PM2 startup needs manual intervention. Please run the command PM2 gave you."
 else
-    STARTUP_CMD=$(pm2 startup | grep "sudo env PATH")
+    STARTUP_CMD=$(pm2 startup | grep "sudo env PATH" | head -n 1)
     eval "$STARTUP_CMD"
     pm2 save
 fi

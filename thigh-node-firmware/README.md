@@ -36,7 +36,7 @@ On boot, the device initialises all hardware subsystems in sequence (OLED, Temp 
    - While on BLE → Wi-Fi reconnect is retried every **5 seconds** in the background.
 3. **Transmits data** — every ~16ms a sensor payload CSV is dispatched to the active connection.
 4. **Drives the UI** — the OLED redraws at 4 FPS with live signal strength bars and the interactive menu system.
-5. **Handles buttons** — edge-detected button presses drive menu navigation with haptic feedback.
+5. **Handles feedback** — edge-detected button presses drive menu navigation with haptic feedback. Integrated **Range Warning** engine triggers vibration if signal is critically low.
 
 ---
 
@@ -93,6 +93,13 @@ The connection engine (`checkNetworkStability`) runs every cycle and enforces th
 | Wi-Fi is primary                | LED stays **solid Green**. BLE remains advertised as backup               |
 | Wi-Fi drops                     | Falls back to BLE if connected. Reconnect attempts continue every 10s     |
 
+### Range Warning (Haptic Feedback)
+
+To prevent data loss when a patient wanders too far from the gateway:
+- **Threshold**: Triggers when Wi-Fi RSSI drops below **-80 dBm**.
+- **Pattern**: 150ms vibration pulse every 3 seconds.
+- **Behavior**: Ceases immediately once signal improves or falls back to a stable BLE connection.
+
 All state transitions are printed to both the USB Serial Monitor and the on-device OLED Serial Monitor buffer.
 
 ### Wi-Fi Only / BLE Only Modes
@@ -109,6 +116,7 @@ Can be forced via the OLED **Network Mode** menu. In forced modes, the auto-reco
 | **Blinking Green+Blue** | Actively searching for any connection (Wi-Fi or BLE)     |
 | **Solid Green**         | Connected via Wi-Fi (primary)                            |
 | **Solid Blue**          | Connected via BLE only; background Wi-Fi hunt is running |
+| **Blinking Red**        | Error state (Sensor init failed)                         |
 
 ---
 

@@ -30,22 +30,23 @@ Thigh Node
    ├── UDP :1234 ──────────────────────────────────┐
    └── BLE (SoterCare_BLE) ──────────────────────────┤
                                                     ▼
-                                          gateway_master.py
-                                    (asyncio + threading, single process)
-                                          │ Resample 60Hz → 50Hz
-                                          │ G_total + fall detection
-                                          │ Edge Impulse gait model
-                                          ▼
-                                       Redis Stream
-                                     sotercare_history
-                                          │
-                                          ▼
-                                       server.py
-                                  (Flask-SocketIO, threading mode)
-                                          │ WebSocket
-                                          ▼
-                                    dashboard-ui/
-                                  (Vite React, port 5173)
+                                            [ PM2 Runtime ]
+                                     ┌──────────────────────────┐
+                                     │    gateway_master.py     │
+                                     │ (Receiver, Resampler, AI)│
+                                     └──────────┬───────────────┘
+                                                │ Redis Stream
+                                                ▼
+                                     ┌──────────────────────────┐
+                                     │        server.py         │
+                                     │    (Flask-SocketIO)      │
+                                     └──────────┬───────────────┘
+                                                │ WebSocket
+                                                ▼
+                                     ┌──────────────────────────┐
+                                     │      dashboard-ui/       │
+                                     │   (Vite React Kiosk)     │
+                                     └──────────────────────────┘
 ```
 
 ---
@@ -125,7 +126,23 @@ Re-flash the Thigh Node.
 
 ---
 
-## Running (4 terminals)
+---
+
+## Running (Production - PM2)
+
+The entire gateway stack is managed by **PM2**. This ensures all services (Gateway, Server, UI) start automatically on boot and restart if they crash.
+
+| Command                           | Purpose                                      |
+| --------------------------------- | -------------------------------------------- |
+| `pm2 start ecosystem.config.js`   | Start the entire SoterCare stack             |
+| `pm2 status`                      | Check health of all services                 |
+| `pm2 logs`                        | View live logs for all services              |
+| `pm2 restart all`                 | Restart the entire stack                     |
+| `pm2 stop all`                    | Stop all services                            |
+
+### Individual Debugging (4 terminals)
+
+If running manually for development:
 
 | Terminal | Command                           | Purpose                          |
 | -------- | --------------------------------- | -------------------------------- |
@@ -174,15 +191,19 @@ pip install edge-impulse-linux
 bash scripts/tune_redis.sh
 ```
 
-### Kiosk Mode (Audio Support)
+### Kiosk Mode (Raspberry Pi 5 / Wayland)
 
-The dashboard uses high-priority medical audio alerts. To allow automated background playback on the Pi:
+The Raspberry Pi 5 uses the **Wayland** display server (`labwc`). The kiosk setup script has been updated to support both X11 and Wayland environments.
 
 ```bash
-# setup_kiosk.sh includes --autoplay-policy flag:
+# Set boot behaviour to Desktop Autologin and configure autostart:
 bash scripts/setup_kiosk.sh
 sudo reboot
 ```
+
+- **Flags**: Includes `--autoplay-policy=no-user-gesture-required` for medical audio alerts and `--kiosk` for full-screen.
+- **Autostart**: Configures `~/.config/labwc/autostart` (Wayland) and `~/.config/autostart/sotercare-kiosk.desktop` (X11).
+- **Delay**: A 10-second delay is built into the browser launch to ensure PM2 services are fully initialized.
 
 ---
 
@@ -192,15 +213,16 @@ sudo reboot
 
 - **Siren System:** Triggers a 2s siren for high-gravity impacts (Falls), manual **Help Calls**, and **Risky Movement** gait detection.
 - **Female Voice Profile:** Uses a pleasant female voice (warmup routine included) with comfort-oriented phrasing.
-- **System Silence:** Routine status updates (Online/Offline) are silent to avoid alarm fatigue.
+- **System Silence:** Routine status updates (Online/Offline) are silent.
 
 ### 2. Monitoring & UX
 
 - **Dual Temperature:** Real-time monitoring of both Patient Skin and Room Ambient temperatures.
-- **Activity Timeline Persistence:** Recent medical events are saved to `localStorage`. The log persists during browser refreshes (F5) but automatically clears on a fresh system boot (session-aware).
+- **Activity Timeline Persistence:** Recent medical events are saved to `localStorage`.
 - **Terminology:** "SOS" has been standardized to **"Help Call"** across the entire UI and backend.
+- **Prioritized Gait Detection:** The dashboard focuses on **"standing up"** and **"sitting down"** transitions to reduce notification fatigue. Other states like "walking" or "stillness" are processed but not alerted.
 
 ### 3. Hardware Feedback & Connectivity
 
-- **Signal Zone Out Vibration:** The Thigh Node actively polls live Wi-Fi RSSI (signal strength) every 1 second. If the signal drops below `-80 dBm` (indicating the user is walking out of range), the on-board motor triggers a sharp 150ms vibration pulse every 3 seconds to warn the user, ceasing immediately once a strong connection is re-established.
-- **Native BLE RSSI:** The Gateway Python script and the firmware natively use `esp_gap_ble_api` callbacks to retrieve and display true BLE signal strength dynamically on the OLED menu and seamlessly inject it into the edge dashboard timeline.
+- **Range Warning Vibration:** The Thigh Node triggers a sharp 150ms vibration pulse every 3 seconds if Wi-Fi signal drops below `-80 dBm` (User out of range).
+- **Native BLE RSSI:** True BLE signal strength is displayed dynamically on the OLED menu and edge dashboard timeline.
