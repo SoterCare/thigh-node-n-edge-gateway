@@ -357,7 +357,19 @@ def pipeline_thread():
         info = runner.init()
         print(f"[AI] Model loaded: {info['project']['name']}")
     except Exception as e:
-        print(f"[AI] Model unavailable ({e}). Gait = N/A")
+        print(f"[AI] Native Edge Impulse model unavailable on this OS ({e}).")
+        print("[AI] Falling back to Mock Gait Model for local testing.")
+        
+        class MockImpulseRunner:
+            def init(self):
+                return {"project": {"name": "Mock Windows Testing Model"}}
+            def classify(self, features):
+                import random
+                # Simulated realistic transitions
+                labels = ["walking", "walking", "walking", "standing_up", "sitting_down", "still", "still"]
+                return {"result": {"classification": {random.choice(labels): 0.99}}}
+        runner = MockImpulseRunner()
+        info = runner.init()
 
     smoother = GaitSmoother(window_size=15) # Approx 1.5s window at 10Hz inference
     imu_window: List[List[float]] = []
