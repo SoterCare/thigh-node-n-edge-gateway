@@ -26,6 +26,12 @@ module.exports = {
         PM2_SERVE_HOMEPAGE: "/index.html"
       },
       restart_delay: 2000
+    },
+    {
+      name: "sotercare-sync",
+      script: "backend_sync.py",
+      interpreter: "./.venv/bin/python",
+      restart_delay: 2000
     }
   ]
 };
