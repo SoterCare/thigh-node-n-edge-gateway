@@ -206,23 +206,36 @@ class GatewayClient:
 
     def _try_send(self, batch: List[Dict]) -> bool:
         """Try WS first, then HTTP fallback."""
+        logs = []
+        for record in batch:
+            # Remove local_id before sending
+            send_record = record.copy()
+            send_record.pop("local_id", None)
+            send_record.pop("device_id", None)
+            logs.append(send_record)
+
+        payload = {
+            "device_id": DEVICE_ID,
+            "logs": logs
+        }
+        
         if INGEST_MODE == "ws" and self.ws_authenticated:
-            if self._send_ws(batch):
+            if self._send_ws(payload, len(batch)):
                 return True
             logger.warning("WS send failed — trying HTTP fallback")
 
-        return self._send_http(batch)
+        return self._send_http(payload, len(batch))
 
-    def _send_ws(self, batch: List[Dict]) -> bool:
+    def _send_ws(self, payload: Dict, count: int) -> bool:
         try:
-            self.sio.emit("device_data", {"logs": batch}, namespace="/realtime")
-            logger.info(f"WS ↑ {len(batch)} records | total sent={self.counters['sent'] + len(batch)}")
+            self.sio.emit("device_data", payload, namespace="/realtime")
+            logger.info(f"WS ↑ {count} records | total sent={self.counters['sent'] + count}")
             return True
         except Exception as e:
             logger.error(f"WS emit error: {e}")
             return False
 
-    def _send_http(self, batch: List[Dict]) -> bool:
+    def _send_http(self, payload: Dict, count: int) -> bool:
         url = f"{SERVER_BASE_URL}/logs/raspberry/sync"
         headers: Dict[str, str] = {
             "Content-Type": "application/json",
@@ -233,12 +246,12 @@ class GatewayClient:
         try:
             resp = requests.post(
                 url,
-                json={"device_id": DEVICE_ID, "logs": batch},
+                json=payload,
                 headers=headers,
                 timeout=15,
             )
             if resp.status_code in (200, 201, 202):
-                logger.info(f"HTTP ↑ {len(batch)} records → {resp.status_code} | total sent={self.counters['sent'] + len(batch)}")
+                logger.info(f"HTTP ↑ {count} records → {resp.status_code} | total sent={self.counters['sent'] + count}")
                 return True
             logger.error(f"HTTP error {resp.status_code}: {resp.text[:200]}")
             return False
@@ -275,20 +288,16 @@ def run_gateway() -> None:
                             last_id = msg_id
                             ts_s = float(fields.get("ts", time.time()))
                             client.add_record({
-                                "id":          int(ts_s * 1000),
-                                "heartRate":   0,
-                                "spo2":        0,
-                                "temperature": float(fields.get("temp", 0)),
-                                "timestamp":   int(ts_s * 1000),
-                                "accX":        float(fields.get("accX", 0)),
-                                "accY":        float(fields.get("accY", 0)),
-                                "accZ":        float(fields.get("accZ", 0)),
-                                "gTotal":      float(fields.get("gTotal", 0)),
-                                "ambientTemp": float(fields.get("ambientTemp", 0)),
-                                "moisture":    int(fields.get("moisture", 0)),
-                                "sos":         int(fields.get("sos", 0)),
-                                "fallAlert":   int(fields.get("fallAlert", 0)),
-                                "gaitLabel":   fields.get("gaitLabel", "N/A"),
+                                "payload": {
+                                    "temp":         float(fields.get("temp", 0)),
+                                    "ambientTemp":  float(fields.get("ambientTemp", 0)),
+                                    "moisture":     int(fields.get("moisture", 0)),
+                                    "gait_label":   fields.get("gaitLabel", "N/A").lower().replace("_", " ").replace("-", " ").strip(),
+                                    "sos_trigger":  int(fields.get("sos", 0)) == 1,
+                                    "thighnode_status": fields.get("source", "unknown"),
+                                    "fall_alert":   int(fields.get("fallAlert", 0)) == 1,
+                                    "unix_timestamp": int(ts_s)
+                                }
                             })
             except redis.exceptions.ConnectionError:
                 logger.warning("Redis unavailable — retrying in 5s")
@@ -302,12 +311,16 @@ def run_gateway() -> None:
         import itertools
         for _ in itertools.count():
             client.add_record({
-                "id": int(time.time() * 1000),
-                "heartRate": 75, "spo2": 98, "temperature": 36.6,
-                "timestamp": int(time.time() * 1000),
-                "accX": 0.1, "accY": 0.9, "accZ": 0.2, "gTotal": 0.92,
-                "ambientTemp": 25.0, "moisture": 300,
-                "sos": 0, "fallAlert": 0, "gaitLabel": "Walking",
+                "payload": {
+                    "temp": 36.6,
+                    "ambientTemp": 25.0,
+                    "moisture": 300,
+                    "gait_label": "walking",
+                    "sos_trigger": False,
+                    "thighnode_status": "mock",
+                    "fall_alert": False,
+                    "unix_timestamp": int(time.time())
+                }
             })
             time.sleep(1.0)
 
