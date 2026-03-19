@@ -240,13 +240,15 @@ async def ble_task():
 async def command_listener_task():
     """Listens for commands from the dashboard (via server.py) over Redis PubSub."""
     r_async = redis.Redis(host="localhost", port=6379, decode_responses=True)
-    pubsub = r_async.pubsub()
-    pubsub.subscribe(REDIS_COMMANDS)
-    
-    print("[CMD] Listening for commands on Redis channel:", REDIS_COMMANDS)
+    pubsub = None
     
     while True:
         try:
+            if pubsub is None:
+                pubsub = r_async.pubsub()
+                pubsub.subscribe(REDIS_COMMANDS)
+                print("[CMD] Listening for commands on Redis channel:", REDIS_COMMANDS)
+                
             # Non-blocking get_message
             message = pubsub.get_message(ignore_subscribe_messages=True, timeout=0.1)
             if message:
@@ -300,6 +302,11 @@ async def command_listener_task():
                         r_async.publish(REDIS_RESPONSES, json.dumps({"cmd": "configure_result", "status": "error", "message": "Failed to connect or send data."}))
 
             await asyncio.sleep(0.1) # Yield to event loop
+        except redis.exceptions.ConnectionError as e:
+            # Reconnect on next iteration
+            pubsub = None
+            print(f"[CMD] Redis not available, retrying in 5s... ({e})")
+            await asyncio.sleep(5.0)
         except Exception as e:
             print(f"[CMD] Command listener error: {e}")
             await asyncio.sleep(1.0)
