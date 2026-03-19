@@ -4,3 +4,4 @@ eventlet
 redis
 bleak
 edge-impulse-linux
+flask-cors
