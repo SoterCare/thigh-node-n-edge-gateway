@@ -14,3 +14,4 @@ python-socketio[client]
 websocket-client
 requests
 python-dotenv
+dotenv
