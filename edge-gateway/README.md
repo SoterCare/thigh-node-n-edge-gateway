@@ -192,18 +192,16 @@ bash scripts/tune_redis.sh
 ```
 
 ### Kiosk Mode (Raspberry Pi 5 / Wayland)
+The Raspberry Pi 5 uses the **Wayland** display server (`labwc`) by default in recent OS versions. The kiosk setup has been optimized for this environment:
 
-The Raspberry Pi 5 uses the **Wayland** display server (`labwc`). The kiosk setup script has been updated to support both X11 and Wayland environments.
-
-```bash
-# Set boot behaviour to Desktop Autologin and configure autostart:
-bash scripts/setup_kiosk.sh
-sudo reboot
-```
-
-- **Flags**: Includes `--autoplay-policy=no-user-gesture-required` for medical audio alerts and `--kiosk` for full-screen.
-- **Autostart**: Configures `~/.config/labwc/autostart` (Wayland) and `~/.config/autostart/sotercare-kiosk.desktop` (X11).
-- **Delay**: A 10-second delay is built into the browser launch to ensure PM2 services are fully initialized.
+- **Configuration**: Primary configuration is now handled via `~/.config/labwc/autostart`. The redundant `~/.config/autostart/sotercare-kiosk.desktop` is disabled to prevent conflicts.
+- **Flags**: Optimized for a clean, stable experience:
+    - `--app=http://localhost:5173`: Launches as a standalone application instead of a browser window.
+    - `--start-fullscreen`: Forces immediate fullscreen mode.
+    - `--kiosk`: Standard kiosk lock-down.
+    - `--autoplay-policy=no-user-gesture-required`: Required for automated medical audio alerts.
+    - `--no-first-run`: Skips setup screens on boot.
+- **Delay**: A **15-second delay** ensures all PM2 backend services and the Vite dev server are fully live before the browser attempts to load the dashboard.
 
 ---
 
@@ -220,7 +218,8 @@ sudo reboot
 - **Dual Temperature:** Real-time monitoring of both Patient Skin and Room Ambient temperatures.
 - **Activity Timeline Persistence:** Recent medical events are saved to `localStorage`.
 - **Terminology:** "SOS" has been standardized to **"Help Call"** across the entire UI and backend.
-- **Prioritized Gait Detection:** The dashboard focuses on **"standing up"** and **"sitting down"** transitions to reduce notification fatigue. Other states like "walking" or "stillness" are processed but not alerted.
+- **Gait Analysis Smoothing:** Implements a `GaitSmoother` using a **sliding window majority vote** (15 samples). It requires a **75% confidence threshold** to switch labels, which eliminates flickering and ensures stable "standing up" and "sitting down" alerts.
+- **Optimized Inference:** Gait AI inference is throttled to **10Hz** (every 5 IMU frames) to maintain system responsiveness while providing smooth, accurate real-time monitoring.
 
 ### 3. Hardware Feedback & Connectivity
 

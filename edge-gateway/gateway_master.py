@@ -329,8 +329,8 @@ class GaitSmoother:
         counts = Counter(self.window)
         most_common, count = counts.most_common(1)[0]
         
-        # Require 60% confidence to switch labels
-        if count >= (len(self.window) * 0.6):
+        # Require 75% confidence to switch labels (more stable)
+        if count >= (len(self.window) * 0.75):
             self.last_stable_label = most_common
             
         return self.last_stable_label
@@ -352,8 +352,9 @@ def pipeline_thread():
     except Exception as e:
         print(f"[AI] Model unavailable ({e}). Gait = N/A")
 
-    smoother = GaitSmoother(window_size=20) # Approx 0.4s window at 50Hz
+    smoother = GaitSmoother(window_size=15) # Approx 1.5s window at 10Hz inference
     imu_window: List[List[float]] = []
+    inference_counter = 0
 
     while True:
         try:
@@ -386,46 +387,45 @@ def pipeline_thread():
                 pass
 
         # AI inference
-        gait_label = "N/A"
-        curr_runner = runner
-        if curr_runner is not None:
-            # Narrow imu_window to List[List[float]] for the analyzer
-            win_ref = cast(List[List[float]], imu_window)
+        gait_label = smoother.last_stable_label
+        
+        # Append all 6 axes to imu_window for model inference
+        win_ref = cast(List[List[float]], imu_window)
+        gx, gy, gz = frame["gyroX"], frame["gyroY"], frame["gyroZ"]
+        win_ref.append([ax, ay, az, gx, gy, gz])
+        
+        # Model window is 125 samples @ 50Hz (2.5s)
+        win = 125
+        axes = 6
+
+        if len(win_ref) >= win:
+            curr_runner = runner
+            if curr_runner is not None:
+                inference_counter += 1
+                if inference_counter >= 5: # Run every 5 frames (10Hz / 0.1s)
+                    inference_counter = 0
+                    try:
+                        # Filter window to match model axes (Acc+Gyro)
+                        # The SoterCare model uses a flat list of 750 floats (125 samples * 6 axes)
+                        w_start = len(win_ref) - win
+                        features = []
+                        for i in range(w_start, len(win_ref)):
+                            for a in range(axes):
+                                features.append(float(win_ref[i][a]))
+                        
+                        # SDK expects a flat list of features
+                        res_raw = curr_runner.classify(features)
+                        res = cast(Dict[str, Any], res_raw)
+                        cls = res.get("result", {}).get("classification", {})
+                        if cls:
+                            raw_label = str(max(cls, key=cls.get))
+                            gait_label = smoother.update(raw_label)
+                    except Exception as e:
+                        print(f"[AI] Inference error: {e}")
             
-            # Append all 6 axes for flexibility
-            gx, gy, gz = frame["gyroX"], frame["gyroY"], frame["gyroZ"]
-            win_ref.append([ax, ay, az, gx, gy, gz])
-            
-            # Hard-coded for the specific SoterCare 6-axis model (125 samples * 6 axes)
-            # The previous auto-detect was failing in back-compat modes.
-            feat_count = 750
-            axes = 6
-            win = 125
-            
-            if len(win_ref) >= win:
-                try:
-                    # Filter window to match model axes (Acc only or Acc+Gyro)
-                    # Use explicit indexing/range to avoid slice ambiguity
-                    # Filter window to match model axes (Acc only or Acc+Gyro)
-                    # Use explicit indexing/range to ensure we get a flat list of floats
-                    w_start = len(win_ref) - win
-                    features = []
-                    for i in range(w_start, len(win_ref)):
-                        for a in range(axes):
-                            features.append(float(win_ref[i][a]))
-                    
-                    # SDK expects a flat list of features, NOT a dictionary
-                    res_raw = curr_runner.classify(features)
-                    res = cast(Dict[str, Any], res_raw)
-                    cls = res.get("result", {}).get("classification", {})
-                    if cls:
-                        raw_label = str(max(cls, key=cls.get))
-                        gait_label = smoother.update(raw_label)
-                except Exception as e:
-                    print(f"[AI] Inference error: {e}")
-                
-                # Maintain the window by keeping the last 'win' samples to avoid memory leak
-                imu_window = win_ref[-win:]
+            # Maintain the window by keeping the last 'win' samples to avoid memory leak
+            # Always trim once the window is full, regardless of whether inference ran.
+            imu_window = win_ref[-win:]
 
         # Write to Redis
         fields = {
