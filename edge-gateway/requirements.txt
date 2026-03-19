@@ -1,7 +1,17 @@
+# ── Web Dashboard / Server (server.py) ──
 flask
 flask-socketio
 eventlet
+flask-cors
+
+# ── Edge Gateway (gateway_master.py) ──
 redis
 bleak
 edge-impulse-linux
-flask-cors
+
+# ── Cloud Sync (backend_sync.py) ──
+python-socketio[client]
+websocket-client
+requests
+python-dotenv
+dotenv
