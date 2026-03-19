@@ -5,3 +5,6 @@ redis
 bleak
 edge-impulse-linux
 flask-cors
+python-socketio[client]
+requests
+python-dotenv
