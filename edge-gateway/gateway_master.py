@@ -22,9 +22,13 @@ import json
 from typing import Any, Dict, List, cast
 
 import redis # type: ignore
+import socketio as sio_lib # type: ignore
 from collections import deque, Counter
 from bleak import BleakClient, BleakScanner # type: ignore
 from fall_detector import FallDetector # type: ignore
+from dotenv import load_dotenv # type: ignore
+
+load_dotenv()
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 UDP_HOST        = "0.0.0.0"
@@ -44,8 +48,16 @@ BLE_RX_UUID     = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model", "gait_model.eim")
 
+# ── Cloud Sync Configuration ──────────────────────────────────────────────────
+SERVER_BASE_URL = os.getenv("SERVER_BASE_URL", "wss://backend.sotercare.com")
+WS_SERVER_URL   = SERVER_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
+DEVICE_KEY      = os.getenv("DEVICE_KEY", "")
+DEVICE_ID       = os.getenv("DEVICE_ID", "pi-ffc585939c23")
+CLOUD_BATCH_S   = float(os.getenv("CLOUD_BATCH_S", "1.0"))   # seconds between cloud sends
+
 # ── Shared state (thread-safe, single process) ────────────────────────────────
 frame_q        = queue.Queue(maxsize=2000)
+cloud_q        = queue.Queue(maxsize=500)   # in-memory buffer for real-time cloud sync
 udp_last_seen  = 0.0
 udp_ever_seen  = False
 connection_mode = "searching"
@@ -463,9 +475,140 @@ def pipeline_thread():
             "ts":        f"{frame['ts']:.3f}",
         }
         try:
+            print(f"[Gateway] frame: temp={fields['temp']} ambientTemp={fields['ambientTemp']} moisture={fields['moisture']} gait={fields['gaitLabel']} fall={fields['fallAlert']} sos={fields['sos']} src={fields['source']} ts={fields['ts']}")
             r.xadd(REDIS_STREAM, fields, maxlen=REDIS_MAXLEN, approximate=True)
         except Exception as e:
             print(f"[Redis] Write error: {e}")
+
+        # ── Push to cloud_q for real-time direct send (bypasses Redis lag) ──
+        cloud_entry = {
+            "temp":           float(fields["temp"]),
+            "ambientTemp":    float(fields["ambientTemp"]),
+            "moisture":       int(fields["moisture"]),
+            "gait_label":     fields["gaitLabel"].lower().replace("_", " ").replace("-", " ").strip(),
+            "sos_trigger":    fields["sos"] == "1",
+            "fall_alert":     fields["fallAlert"] == "1",
+            "unix_timestamp": int(float(fields["ts"])),
+        }
+        try:
+            cloud_q.put_nowait(cloud_entry)
+        except queue.Full:
+            pass  # drop oldest-style: queue is capped, new data wins by not blocking
+
+# ── Cloud Sync Thread ─────────────────────────────────────────────────────────
+def cloud_sync_thread():
+    """
+    Reads from cloud_q (in-memory, filled by pipeline_thread) and sends
+    batches directly to wss://backend.sotercare.com/realtime in real-time.
+    Does NOT go through Redis — no 17-second Redis lag.
+
+    On network failure: writes unsent entries to a Redis buffer stream
+    so backend_sync.py can catch up when the connection returns.
+    """
+    r_buf = redis.Redis(host="localhost", port=6379, decode_responses=True)
+    sio = sio_lib.Client(
+        reconnection=True,
+        reconnection_delay=2,
+        reconnection_delay_max=30,
+        logger=False,
+        engineio_logger=False,
+    )
+    _ws_authenticated = threading.Event()
+    _auth_done = threading.Event()
+    total_sent = 0
+
+    @sio.on("connect", namespace="/realtime")
+    def _on_connect():
+        _ws_authenticated.clear()
+        _auth_done.clear()
+        print("[Cloud] Connected — sending device_auth…")
+
+        def auth_ack(ack):
+            print(f"[Cloud] authAck: {ack}")
+            _ws_authenticated.set()
+            _auth_done.set()
+
+        sio.emit("device_auth", {
+            "device_id":  DEVICE_ID,
+            "device_key": DEVICE_KEY,
+            "timestamp":  int(time.time() * 1000),
+        }, namespace="/realtime", callback=auth_ack)
+
+    @sio.on("exception", namespace="/realtime")
+    def _on_exception(data):
+        print(f"[Cloud] server exception: {data}")
+        _ws_authenticated.clear()
+        _auth_done.set()
+
+    @sio.on("connect_error", namespace="/realtime")
+    def _on_connect_error(data):
+        _ws_authenticated.clear()
+        _auth_done.set()
+
+    @sio.on("disconnect", namespace="/realtime")
+    def _on_disconnect():
+        print("[Cloud] Disconnected")
+        _ws_authenticated.clear()
+        _auth_done.set()
+
+    def _connect_loop():
+        while True:
+            try:
+                print(f"[Cloud] Connecting to {WS_SERVER_URL}/realtime …")
+                sio.connect(WS_SERVER_URL, namespaces=["/realtime"], transports=["websocket"], wait_timeout=15)
+                sio.wait()
+            except Exception as e:
+                print(f"[Cloud] Connect failed: {e} — retry in 5 s")
+                time.sleep(5)
+
+    threading.Thread(target=_connect_loop, daemon=True, name="CloudWS").start()
+
+    # Wait up to 15 s for auth before starting the drain loop
+    _auth_done.wait(timeout=15)
+
+    CLOUD_BUFFER_STREAM = "sotercare_cloud_buffer"
+
+    def _write_redis_buffer(entries):
+        for entry in entries:
+            try:
+                r_buf.xadd(CLOUD_BUFFER_STREAM, {k: str(v) for k, v in entry.items()},
+                           maxlen=2000, approximate=True)
+            except Exception:
+                pass
+
+    while True:
+        try:
+            # Block until a single frame arrives, then send it instantly
+            entry = cloud_q.get(block=True, timeout=1.0)
+        except queue.Empty:
+            continue
+
+        batch = [entry]
+        
+        if _ws_authenticated.is_set():
+            def _ack(ack_data, _batch=batch):
+                nonlocal total_sent
+                success = (
+                    (isinstance(ack_data, dict) and ack_data.get("success")) or
+                    (isinstance(ack_data, list) and ack_data and isinstance(ack_data[0], dict) and ack_data[0].get("success")) or
+                    bool(ack_data)
+                )
+                if success:
+                    total_sent += 1
+                    lag = time.time() - _batch[0]["unix_timestamp"]
+                    print(f"[Cloud] ↑ sent 1 log | total={total_sent} lag={lag:.3f}s")
+                else:
+                    _write_redis_buffer(_batch)
+                    print(f"[Cloud] ack failure — buffered 1 log to Redis")
+
+            try:
+                sio.emit("device_data", {"logs": batch}, namespace="/realtime", callback=_ack)
+            except Exception as e:
+                print(f"[Cloud] emit error: {e} — buffering 1 log to Redis")
+                _write_redis_buffer(batch)
+        else:
+            # Not connected — buffer to Redis for catch-up
+            _write_redis_buffer(batch)
 
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
@@ -483,6 +626,11 @@ if __name__ == "__main__":
     t_pipe = threading.Thread(target=pipeline_thread, daemon=True, name="Pipeline")
     t_pipe.start()
     print(f"[MAIN] Pipeline thread started.")
+
+    # Start real-time cloud sync thread (reads cloud_q directly — no Redis hop)
+    t_cloud = threading.Thread(target=cloud_sync_thread, daemon=True, name="CloudSync")
+    t_cloud.start()
+    print(f"[MAIN] Cloud sync thread started.")
 
     async def main():
         ble_watchdog = asyncio.create_task(ble_task())
