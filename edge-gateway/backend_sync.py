@@ -69,23 +69,21 @@ class GatewayClient:
         @self.sio.on("connect", namespace="/realtime")
         def _on_connect():
             logger.info("WS connected — sending device_auth")
-            # Send as event (some backends) and mark authenticated immediately
-            # since backend may not send a confirmation event
-            self.sio.emit("device_auth", {
-                "device_id":  DEVICE_ID,
-                "device_key": DEVICE_KEY,
-                "timestamp":  int(time.time() * 1000),
-            }, namespace="/realtime")
-            # Treat connect itself as auth success — backend validates device_key server-side
-            self.ws_authenticated = True
-            logger.info("WS marked as authenticated — will send via WebSocket")
+            self.ws_authenticated = False  # wait for ack before sending data
+            self.sio.emit(
+                "device_auth",
+                {
+                    "device_id":  DEVICE_ID,
+                    "device_key": DEVICE_KEY,
+                    "timestamp":  int(time.time() * 1000),
+                },
+                namespace="/realtime",
+                callback=self._on_auth_ack,
+            )
 
-        # Also listen for explicit auth confirmations in case the backend does emit them
-        for _evt in ("auth_success", "authenticated", "device_authenticated", "auth_ok"):
-            @self.sio.on(_evt, namespace="/realtime")
-            def _on_auth(data=None, evt=_evt):
-                logger.info(f"WS auth confirmed via '{evt}': {data}")
-                self.ws_authenticated = True
+        @self.sio.on("exception", namespace="/realtime")
+        def _on_exception(data):
+            logger.error(f"WS exception from server: {data}")
 
         @self.sio.on("connect_error", namespace="/realtime")
         def _on_error(data):
@@ -97,10 +95,16 @@ class GatewayClient:
             logger.warning("WS disconnected — falling back to HTTP")
             self.ws_authenticated = False
 
-        # Log any unexpected events from the server for debugging
-        @self.sio.on("*", namespace="/realtime")
-        def _on_any(event, data=None):
-            logger.info(f"[WS EVENT] '{event}' → {data}")
+    def _on_auth_ack(self, ack) -> None:
+        """Called by the server in response to the device_auth emit."""
+        logger.info(f"device_auth ack received: {ack}")
+        # The ack payload varies by backend; treat any non-error response as success.
+        if isinstance(ack, dict) and ack.get("error"):
+            logger.error(f"device_auth rejected: {ack}")
+            self.ws_authenticated = False
+        else:
+            self.ws_authenticated = True
+            logger.info("WS authenticated — will send data via WebSocket")
 
     # ── Disk spool ────────────────────────────────────────────────────────────
     def _load_spool(self) -> None:
@@ -145,16 +149,11 @@ class GatewayClient:
     def connect_ws(self) -> None:
         try:
             logger.info(f"Connecting WS to {SERVER_BASE_URL}/realtime ...")
-            # Pass credentials in Socket.IO v4 connection auth (handshake level)
             self.sio.connect(
                 SERVER_BASE_URL,
                 namespaces=["/realtime"],
                 transports=["websocket"],
                 wait_timeout=15,
-                auth={
-                    "device_id":  DEVICE_ID,
-                    "device_key": DEVICE_KEY,
-                }
             )
         except Exception as e:
             logger.error(f"WS initial connect failed: {e}")
@@ -206,29 +205,52 @@ class GatewayClient:
 
     def _try_send(self, batch: List[Dict]) -> bool:
         """Try WS first, then HTTP fallback."""
+        # Build flat log entries matching the backend contract (same shape as JS reference)
         logs = []
         for record in batch:
-            # Remove local_id before sending
-            send_record = record.copy()
-            send_record.pop("local_id", None)
-            send_record.pop("device_id", None)
-            logs.append(send_record)
+            entry = record.get("payload", record).copy()
+            entry.pop("local_id", None)
+            entry.pop("device_id", None)
+            entry.pop("thighnode_status", None)  # not in backend contract
+            logs.append(entry)
 
-        payload = {
-            "device_id": DEVICE_ID,
-            "logs": logs
-        }
-        
+        # WS payload: { logs: [...] }  (device identity already established via device_auth)
+        ws_payload = {"logs": logs}
+        # HTTP payload keeps device_id for stateless auth
+        http_payload = {"device_id": DEVICE_ID, "logs": logs}
+
         if INGEST_MODE == "ws" and self.ws_authenticated:
-            if self._send_ws(payload, len(batch)):
+            if self._send_ws(ws_payload, len(batch)):
                 return True
             logger.warning("WS send failed — trying HTTP fallback")
 
-        return self._send_http(payload, len(batch))
+        return self._send_http(http_payload, len(batch))
 
     def _send_ws(self, payload: Dict, count: int) -> bool:
+        """Emit device_data and wait for the server acknowledgement."""
+        ack_event = threading.Event()
+        ack_result: Dict[str, Any] = {}
+
+        def _on_ack(ack):
+            logger.info(f"device_data ack: {ack}")
+            ack_result["data"] = ack
+            ack_event.set()
+
         try:
-            self.sio.emit("device_data", payload, namespace="/realtime")
+            self.sio.emit(
+                "device_data",
+                payload,
+                namespace="/realtime",
+                callback=_on_ack,
+            )
+            # Wait up to 10 s for the server to acknowledge
+            if not ack_event.wait(timeout=10):
+                logger.warning("device_data ack timed out")
+                return False
+            ack = ack_result.get("data", {})
+            if isinstance(ack, dict) and ack.get("error"):
+                logger.error(f"device_data rejected by server: {ack}")
+                return False
             logger.info(f"WS ↑ {count} records | total sent={self.counters['sent'] + count}")
             return True
         except Exception as e:
@@ -289,14 +311,13 @@ def run_gateway() -> None:
                             ts_s = float(fields.get("ts", time.time()))
                             client.add_record({
                                 "payload": {
-                                    "temp":         float(fields.get("temp", 0)),
-                                    "ambientTemp":  float(fields.get("ambientTemp", 0)),
-                                    "moisture":     int(fields.get("moisture", 0)),
-                                    "gait_label":   fields.get("gaitLabel", "N/A").lower().replace("_", " ").replace("-", " ").strip(),
-                                    "sos_trigger":  int(fields.get("sos", 0)) == 1,
-                                    "thighnode_status": fields.get("source", "unknown"),
-                                    "fall_alert":   int(fields.get("fallAlert", 0)) == 1,
-                                    "unix_timestamp": int(ts_s)
+                                    "temp":           float(fields.get("temp", 0)),
+                                    "ambientTemp":    float(fields.get("ambientTemp", 0)),
+                                    "moisture":       int(fields.get("moisture", 0)),
+                                    "gait_label":     fields.get("gaitLabel", "N/A").lower().replace("_", " ").replace("-", " ").strip(),
+                                    "sos_trigger":    int(fields.get("sos", 0)) == 1,
+                                    "fall_alert":     int(fields.get("fallAlert", 0)) == 1,
+                                    "unix_timestamp": int(ts_s),
                                 }
                             })
             except redis.exceptions.ConnectionError:
