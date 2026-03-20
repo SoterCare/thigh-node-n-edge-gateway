@@ -1,13 +1,9 @@
 """
 SoterCare — backend_sync.py
 Tails the Redis stream written by gateway_master.py and forwards each
-frame to the SoterCare cloud backend via WebSocket exclusively, exactly matching the
-protocol in ws-prod-check.cjs:
+frame to the SoterCare cloud backend via WebSocket exclusively.
 
-  • Connect to wss://backend.sotercare.com  namespace: /realtime
-  • On connect  → emit device_auth  → wait for ack callback
-  • After auth  → emit device_data { logs: [singleEntry] } every 1 s
-                 → wait for ack callback before sending next
+Realtime mode: sends values immediately as they are retrieved from Redis.
 """
 
 import os
@@ -22,17 +18,14 @@ from dotenv import load_dotenv
 # ── Config ────────────────────────────────────────────────────────────────────
 load_dotenv()
 
-SERVER_BASE_URL   = os.getenv("SERVER_BASE_URL", "https://backend.sotercare.com")
-# socket.io url specifically using wss
-WS_SERVER_URL     = SERVER_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
+WS_SERVER_URL     = os.getenv("WS_SERVER_URL", "wss://backend.sotercare.com")
 
 DEVICE_KEY        = os.getenv("DEVICE_KEY")
 DEVICE_ID         = os.getenv("DEVICE_ID", "pi-ffc585939c23")
-SEND_INTERVAL_S   = float(os.getenv("SEND_INTERVAL_S", "1.0"))   # 1 log per second (CJS parity)
 REDIS_STREAM      = "sotercare_history"                            # written by gateway_master.py
 
-RETRY_BASE_S      = int(os.getenv("RETRY_BASE_MS",  "1000")) / 1000
-RETRY_MAX_S       = int(os.getenv("RETRY_MAX_MS",  "60000")) / 1000
+RETRY_BASE_S: float = float(int(os.getenv("RETRY_BASE_MS",  "1000"))) / 1000.0
+RETRY_MAX_S: float  = float(int(os.getenv("RETRY_MAX_MS",  "60000"))) / 1000.0
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
@@ -72,8 +65,8 @@ class GatewayClient:
             self.ws_authenticated = False
             self._auth_done.clear()
             
-            def auth_ack(ack_data):
-                logger.info(f"[WS] authAck: {ack_data}")
+            def auth_ack(*args):
+                logger.info(f"[WS] authAck: {args}")
                 self.ws_authenticated = True
                 self._auth_done.set()
 
@@ -121,35 +114,19 @@ class GatewayClient:
     # ── Send one log entry via WS (mirrors CJS setInterval body) ─────────────
     def _send_ws_one(self, log_entry: Dict[str, Any]) -> bool:
         """
-        emit("device_data", { logs: [logEntry] }, callback)  — like CJS.
-        Waits for the ack callback before returning.
+        emit("device_data", { logs: [logEntry] }, callback)
+        Executes asynchronously (fire-and-forget) without blocking to achieve super speed.
         """
-        ack_event = threading.Event()
-        ack_result = {"success": False}
-        
-        def data_ack(ack_data):
-            if type(ack_data) == dict and ack_data.get("success"):
-                ack_result["success"] = True
-            elif type(ack_data) == list and len(ack_data) > 0 and type(ack_data[0]) == dict and ack_data[0].get("success"):
-                ack_result["success"] = True
-            elif ack_data:
-                # Based on js script logs
-                ack_result["success"] = True
-            ack_event.set()
+        def data_ack(*args):
+            self.total_sent += 1
+            logger.info(f"[WS ↑] dataAck received: {args} | total verified = {self.total_sent}")
 
         try:
+            logger.info(f"[WS ↑] Sending logEntry: {log_entry}")
             self.sio.emit("device_data", {"logs": [log_entry]}, namespace="/realtime", callback=data_ack)
             
-            # Wait up to 5 seconds for success ack
-            ack_event.wait(timeout=5.0)
-            
-            if ack_result["success"]:
-                self.total_sent += 1
-                logger.info(f"[WS ↑] log sent | total={self.total_sent}")
-                return True
-            else:
-                logger.warning("[WS] Emit timeout or no success ack returned")
-                return False
+            # Return true instantly to unblock Redis and push the next record immediately
+            return True
         except Exception as e:
             logger.error(f"[WS] emit error: {e}")
             return False
@@ -158,7 +135,7 @@ class GatewayClient:
     def _parse_fields(self, fields: Dict[str, str]) -> Optional[Dict[str, Any]]:
         """
         Converts a gateway_master Redis stream entry into the log shape that
-        the backend expects (same fields as in ws-prod-check.cjs logEntry).
+        the backend expects.
         """
         try:
             ts = float(fields.get("ts", time.time()))
@@ -185,18 +162,14 @@ class GatewayClient:
     # ── Main sync loop ────────────────────────────────────────────────────────
     def run_sync_loop(self) -> None:
         """
-        Tail `sotercare_history` and forward one frame per SEND_INTERVAL_S,
-        mirroring the CJS setInterval(…, 1000) pattern.
-
+        Tail `sotercare_history` and forward each frame as fast as possible.
         Cursor advances only after a successful send — no data loss on failures.
         """
         last_id = "$"           # start from newest data
-        retry_delay = RETRY_BASE_S
-        logger.info(f"[SYNC] Tailing '{REDIS_STREAM}' — 1 log/{SEND_INTERVAL_S}s (CJS parity)")
+        retry_delay: float = RETRY_BASE_S
+        logger.info(f"[SYNC] Tailing '{REDIS_STREAM}' in realtime mode (no pacing delay)")
 
         while True:
-            cycle_start = time.time()
-
             # ── Read next frame from Redis stream (block up to 1 s) ──────────
             entry: Optional[Dict[str, Any]] = None
             new_last_id = last_id
@@ -234,14 +207,10 @@ class GatewayClient:
             if sent:
                 last_id = new_last_id          # advance cursor on success
                 retry_delay = RETRY_BASE_S
-
-                # Pace to SEND_INTERVAL_S (CJS: setInterval 1000 ms)
-                elapsed = time.time() - cycle_start
-                sleep_for = max(0.0, SEND_INTERVAL_S - elapsed)
-                if sleep_for > 0:
-                    time.sleep(sleep_for)
+                
+                # Removed artificial sleep_for limits here to stream data in realtime!
             else:
-                retry_delay = min(retry_delay * 2, RETRY_MAX_S)
+                retry_delay = min(retry_delay * 2.0, RETRY_MAX_S)  # type: ignore
                 logger.warning(f"[SYNC] Send failed — backoff {retry_delay:.0f} s")
                 time.sleep(retry_delay)
 
@@ -254,8 +223,6 @@ def run_gateway() -> None:
     ).start()
     
     # Wait up to 10 s for WS to connect AND device_auth ack to arrive
-    # before starting the sync loop (mirrors CJS flow where sends start
-    # only inside the authAck callback)
     logger.info("[SYNC] Waiting for WS auth (up to 10 s)…")
     if client._auth_done.wait(timeout=10.0):
         if client.ws_authenticated:
