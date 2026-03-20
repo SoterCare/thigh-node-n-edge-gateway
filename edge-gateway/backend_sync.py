@@ -1,47 +1,48 @@
 """
 SoterCare — backend_sync.py
-Tails the local Redis stream written by gateway_master.py and forwards
-batches to the SoterCare cloud backend via WebSocket (primary) or HTTP
-fallback.  All flushing happens on a single background thread to avoid
-race conditions and request floods.
+Tails the Redis stream written by gateway_master.py and forwards each
+frame to the SoterCare cloud backend via WebSocket exclusively, exactly matching the
+protocol in ws-prod-check.cjs:
+
+  • Connect to wss://backend.sotercare.com  namespace: /realtime
+  • On connect  → emit device_auth  → wait for ack callback
+  • After auth  → emit device_data { logs: [singleEntry] } every 1 s
+                 → wait for ack callback before sending next
 """
 
 import os
 import time
-import json
 import logging
 import threading
 import socketio
-import requests
 import redis
-from typing import Dict, Any, List
+from typing import Dict, Any, Optional
 from dotenv import load_dotenv
 
 # ── Config ────────────────────────────────────────────────────────────────────
 load_dotenv()
 
 SERVER_BASE_URL   = os.getenv("SERVER_BASE_URL", "https://backend.sotercare.com")
-DEVICE_KEY        = os.getenv("DEVICE_KEY")
-RASPBERRY_API_KEY = os.getenv("RASPBERRY_API_KEY")
-INGEST_MODE       = os.getenv("INGEST_MODE", "ws").lower()
-BATCH_SIZE        = int(os.getenv("BATCH_SIZE", "10"))
-FLUSH_INTERVAL_S  = float(os.getenv("FLUSH_INTERVAL_S", "5"))   # seconds between flushes
-RETRY_BASE_S      = int(os.getenv("RETRY_BASE_MS", "1000")) / 1000
-RETRY_MAX_S       = int(os.getenv("RETRY_MAX_MS", "60000")) / 1000
-DEVICE_ID         = os.getenv("DEVICE_ID", "pi-ffc585939c23")
+# socket.io url specifically using wss
+WS_SERVER_URL     = SERVER_BASE_URL.replace("https://", "wss://").replace("http://", "ws://")
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+DEVICE_KEY        = os.getenv("DEVICE_KEY")
+DEVICE_ID         = os.getenv("DEVICE_ID", "pi-ffc585939c23")
+SEND_INTERVAL_S   = float(os.getenv("SEND_INTERVAL_S", "1.0"))   # 1 log per second (CJS parity)
+REDIS_STREAM      = "sotercare_history"                            # written by gateway_master.py
+
+RETRY_BASE_S      = int(os.getenv("RETRY_BASE_MS",  "1000")) / 1000
+RETRY_MAX_S       = int(os.getenv("RETRY_MAX_MS",  "60000")) / 1000
+
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("CloudSync")
 
 if not DEVICE_KEY:
-    logger.error("FATAL: DEVICE_KEY is not set in .env — exiting.")
+    logger.error("FATAL: DEVICE_KEY not set in .env — exiting.")
     raise SystemExit(1)
 
-
-# ── Gateway Client ────────────────────────────────────────────────────────────
+# ── Client ────────────────────────────────────────────────────────────────────
 class GatewayClient:
     def __init__(self) -> None:
         self.sio = socketio.Client(
@@ -54,19 +55,28 @@ class GatewayClient:
         self.redis = redis.Redis(host="localhost", port=6379, decode_responses=True)
 
         self.ws_authenticated = False
+        self.total_sent = 0
 
-        self.counters: Dict[str, int] = {
-            "generated": 0, "sent": 0, "failed": 0,
-        }
+        # Event to signal when device_auth ack has been received
+        self._auth_done = threading.Event()
 
-        self._setup_socket_events()
+        self._register_events()
 
-    # ── Socket.IO ─────────────────────────────────────────────────────────────
-    def _setup_socket_events(self) -> None:
+    # ── Socket.IO events ─────────────────────────────────────────────────────
+    # namespace is /realtime, mirroring CJS: io(".../realtime")
+    def _register_events(self) -> None:
+
         @self.sio.on("connect", namespace="/realtime")
         def _on_connect():
-            logger.info("WS connected — sending device_auth")
-            self.ws_authenticated = False  # wait for ack before sending data
+            logger.info(f"[WS] Connected to {WS_SERVER_URL}/realtime — sending device_auth…")
+            self.ws_authenticated = False
+            self._auth_done.clear()
+            
+            def auth_ack(ack_data):
+                logger.info(f"[WS] authAck: {ack_data}")
+                self.ws_authenticated = True
+                self._auth_done.set()
+
             self.sio.emit(
                 "device_auth",
                 {
@@ -75,255 +85,190 @@ class GatewayClient:
                     "timestamp":  int(time.time() * 1000),
                 },
                 namespace="/realtime",
-                callback=self._on_auth_ack,
+                callback=auth_ack
             )
 
         @self.sio.on("exception", namespace="/realtime")
         def _on_exception(data):
-            logger.error(f"WS exception from server: {data}")
+            logger.error(f"[WS] server exception: {data}")
+            self.ws_authenticated = False
+            self._auth_done.set()    # stop waiting
 
         @self.sio.on("connect_error", namespace="/realtime")
-        def _on_error(data):
-            logger.error(f"WS connect error: {data}")
+        def _on_connect_error(data):
+            logger.error(f"[WS] connect_error: {data}")
             self.ws_authenticated = False
+            self._auth_done.set()
 
         @self.sio.on("disconnect", namespace="/realtime")
         def _on_disconnect():
-            logger.warning("WS disconnected — falling back to HTTP")
+            logger.warning("[WS] Disconnected")
             self.ws_authenticated = False
+            self._auth_done.set()
 
-    def _on_auth_ack(self, ack) -> None:
-        """Called by the server in response to the device_auth emit."""
-        logger.info(f"device_auth ack received: {ack}")
-        # The ack payload varies by backend; treat any non-error response as success.
-        if isinstance(ack, dict) and ack.get("error"):
-            logger.error(f"device_auth rejected: {ack}")
-            self.ws_authenticated = False
-        else:
-            self.ws_authenticated = True
-            logger.info("WS authenticated — will send data via WebSocket")
-
-    # ── Device registration ───────────────────────────────────────────────────
-    def register_device(self) -> None:
-        url = f"{SERVER_BASE_URL}/devices/register"
-        headers: Dict[str, str] = {"Content-Type": "application/json"}
-        if RASPBERRY_API_KEY:
-            headers["x-admin-key"] = RASPBERRY_API_KEY
-        try:
-            resp = requests.post(
-                url,
-                json={"device_id": DEVICE_ID, "device_key": DEVICE_KEY},
-                headers=headers,
-                timeout=10,
-            )
-            logger.info(f"Register → {resp.status_code}: {resp.text[:200]}")
-        except Exception as e:
-            logger.warning(f"Registration failed (non-fatal): {e}")
-
-    # ── WS connect (runs in background thread) ────────────────────────────────
+    # ── WS connection loop (background thread) ────────────────────────────────
     def connect_ws(self) -> None:
-        try:
-            logger.info(f"Connecting WS to {SERVER_BASE_URL}/realtime ...")
-            self.sio.connect(
-                SERVER_BASE_URL,
-                namespaces=["/realtime"],
-                transports=["websocket"],
-                wait_timeout=15,
-            )
-        except Exception as e:
-            logger.error(f"WS initial connect failed: {e}")
+        """Connects to root server and accesses the /realtime namespace"""
+        while True:
+            try:
+                logger.info(f"[WS] Connecting to {WS_SERVER_URL} for namespace /realtime …")
+                self.sio.connect(WS_SERVER_URL, namespaces=["/realtime"], transports=["websocket"], wait_timeout=15)
+                self.sio.wait()          # blocks until disconnected, then retries
+            except Exception as e:
+                logger.error(f"[WS] Connect failed: {e} — retry in 5 s")
+                time.sleep(5)
 
-    # ── Enqueue (called from Redis tail thread) ───────────────────────────────
-    def add_record(self, record: Dict[str, Any]) -> None:
-        """Push record directly to Redis pending queue."""
-        try:
-            self.counters["generated"] += 1
-            self.redis.rpush("sotercare_pending_queue", json.dumps(record))
-        except Exception as e:
-            logger.error(f"Failed to push to Redis queue: {e}")
-
-    # ── Flush thread ──────────────────────────────────────────────────────────
-    def start_flush_thread(self) -> None:
-        """Background thread that continuously drains the Redis queue to the backend."""
-        def _loop():
-            retry_delay = RETRY_BASE_S
-            while True:
-                try:
-                    # Read up to BATCH_SIZE items
-                    items = self.redis.lrange("sotercare_pending_queue", 0, BATCH_SIZE - 1)
-                    if not items:
-                        time.sleep(FLUSH_INTERVAL_S)
-                        continue
-
-                    batch = [json.loads(item) for item in items]
-                    success = self._try_send(batch)
-
-                    if success:
-                        # Remove exactly the items we just successfully sent
-                        self.redis.ltrim("sotercare_pending_queue", len(batch), -1)
-                        self.counters["sent"] += len(batch)
-                        retry_delay = RETRY_BASE_S   # reset backoff
-
-                        # Sleep to govern the send rate, even during backlog sync
-                        time.sleep(FLUSH_INTERVAL_S)
-                    else:
-                        self.counters["failed"] += len(batch)
-                        retry_delay = min(retry_delay * 2, RETRY_MAX_S)
-                        logger.warning(f"Send failed — backing off {retry_delay:.0f}s")
-                        time.sleep(retry_delay)
-
-                except Exception as e:
-                    logger.error(f"Flush loop error: {e}")
-                    time.sleep(FLUSH_INTERVAL_S)
-
-        t = threading.Thread(target=_loop, daemon=True, name="FlushThread")
-        t.start()
-        logger.info(f"Flush thread started (interval={FLUSH_INTERVAL_S}s, batch={BATCH_SIZE})")
-
-    def _try_send(self, batch: List[Dict]) -> bool:
-        """Try WS first, then HTTP fallback."""
-        # Build flat log entries matching the backend contract (same shape as JS reference)
-        logs = []
-        for record in batch:
-            entry = record.get("payload", record).copy()
-            entry.pop("local_id", None)
-            entry.pop("device_id", None)
-            entry.pop("thighnode_status", None)  # not in backend contract
-            logs.append(entry)
-
-        # WS payload: { logs: [...] }  (device identity already established via device_auth)
-        ws_payload = {"logs": logs}
-        # HTTP payload keeps device_id for stateless auth
-        http_payload = {"device_id": DEVICE_ID, "logs": logs}
-
-        if INGEST_MODE == "ws" and self.ws_authenticated:
-            if self._send_ws(ws_payload, len(batch)):
-                return True
-            logger.warning("WS send failed — trying HTTP fallback")
-
-        return self._send_http(http_payload, len(batch))
-
-    def _send_ws(self, payload: Dict, count: int) -> bool:
-        """Emit device_data and wait for the server acknowledgement."""
+    # ── Send one log entry via WS (mirrors CJS setInterval body) ─────────────
+    def _send_ws_one(self, log_entry: Dict[str, Any]) -> bool:
+        """
+        emit("device_data", { logs: [logEntry] }, callback)  — like CJS.
+        Waits for the ack callback before returning.
+        """
         ack_event = threading.Event()
-        ack_result: Dict[str, Any] = {}
-
-        def _on_ack(ack):
-            logger.info(f"device_data ack: {ack}")
-            ack_result["data"] = ack
+        ack_result = {"success": False}
+        
+        def data_ack(ack_data):
+            if type(ack_data) == dict and ack_data.get("success"):
+                ack_result["success"] = True
+            elif type(ack_data) == list and len(ack_data) > 0 and type(ack_data[0]) == dict and ack_data[0].get("success"):
+                ack_result["success"] = True
+            elif ack_data:
+                # Based on js script logs
+                ack_result["success"] = True
             ack_event.set()
 
         try:
-            self.sio.emit(
-                "device_data",
-                payload,
-                namespace="/realtime",
-                callback=_on_ack,
-            )
-            # Wait up to 10 s for the server to acknowledge
-            if not ack_event.wait(timeout=10):
-                logger.warning("device_data ack timed out")
-                return False
-            ack = ack_result.get("data", {})
-            if isinstance(ack, dict) and ack.get("error"):
-                logger.error(f"device_data rejected by server: {ack}")
-                return False
-            logger.info(f"WS ↑ {count} records | total sent={self.counters['sent'] + count}")
-            return True
-        except Exception as e:
-            logger.error(f"WS emit error: {e}")
-            return False
-
-    def _send_http(self, payload: Dict, count: int) -> bool:
-        url = f"{SERVER_BASE_URL}/logs/raspberry/sync"
-        headers: Dict[str, str] = {
-            "Content-Type": "application/json",
-            "x-device-key": DEVICE_KEY,  # type: ignore[assignment]
-        }
-        if RASPBERRY_API_KEY:
-            headers["x-raspberry-key"] = RASPBERRY_API_KEY
-        try:
-            resp = requests.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=15,
-            )
-            if resp.status_code in (200, 201, 202):
-                logger.info(f"HTTP ↑ {count} records → {resp.status_code} | total sent={self.counters['sent'] + count}")
+            self.sio.emit("device_data", {"logs": [log_entry]}, namespace="/realtime", callback=data_ack)
+            
+            # Wait up to 5 seconds for success ack
+            ack_event.wait(timeout=5.0)
+            
+            if ack_result["success"]:
+                self.total_sent += 1
+                logger.info(f"[WS ↑] log sent | total={self.total_sent}")
                 return True
-            logger.error(f"HTTP error {resp.status_code}: {resp.text[:200]}")
-            return False
+            else:
+                logger.warning("[WS] Emit timeout or no success ack returned")
+                return False
         except Exception as e:
-            logger.error(f"HTTP request failed: {e}")
+            logger.error(f"[WS] emit error: {e}")
             return False
 
+    # ── Redis stream → log entry ──────────────────────────────────────────────
+    def _parse_fields(self, fields: Dict[str, str]) -> Optional[Dict[str, Any]]:
+        """
+        Converts a gateway_master Redis stream entry into the log shape that
+        the backend expects (same fields as in ws-prod-check.cjs logEntry).
+        """
+        try:
+            ts = float(fields.get("ts", time.time()))
+            now = time.time()
+            if ts > now + 60:
+                logger.warning(f"[SKIP] Future timestamp {ts:.0f} (now={now:.0f}) — dropping frame")
+                return None
+            return {
+                "temp":           float(fields.get("temp", 0)),
+                "ambientTemp":    float(fields.get("ambientTemp", 0)),
+                "moisture":       int(fields.get("moisture", 0)),
+                "gait_label":     (
+                    fields.get("gaitLabel", "N/A")
+                    .lower().replace("_", " ").replace("-", " ").strip()
+                ),
+                "sos_trigger":    int(fields.get("sos", 0)) == 1,
+                "fall_alert":     int(fields.get("fallAlert", 0)) == 1,
+                "unix_timestamp": int(ts),
+            }
+        except Exception as e:
+            logger.error(f"[PARSE] Error: {e} — fields={fields}")
+            return None
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-def run_gateway() -> None:
-    client = GatewayClient()
-    client.register_device()
+    # ── Main sync loop ────────────────────────────────────────────────────────
+    def run_sync_loop(self) -> None:
+        """
+        Tail `sotercare_history` and forward one frame per SEND_INTERVAL_S,
+        mirroring the CJS setInterval(…, 1000) pattern.
 
-    # WebSocket connection runs in a background daemon thread
-    if INGEST_MODE == "ws":
-        threading.Thread(target=client.connect_ws, daemon=True, name="WSConnect").start()
-
-    # Single flush thread — the ONLY place that calls send
-    client.start_flush_thread()
-
-    # Redis tail — just enqueues, never flushes
-    try:
-        r = client.redis
-        last_id = "$"
-        logger.info("Tailing Redis stream 'sotercare_history'...")
+        Cursor advances only after a successful send — no data loss on failures.
+        """
+        last_id = "$"           # start from newest data
+        retry_delay = RETRY_BASE_S
+        logger.info(f"[SYNC] Tailing '{REDIS_STREAM}' — 1 log/{SEND_INTERVAL_S}s (CJS parity)")
 
         while True:
+            cycle_start = time.time()
+
+            # ── Read next frame from Redis stream (block up to 1 s) ──────────
+            entry: Optional[Dict[str, Any]] = None
+            new_last_id = last_id
             try:
-                results = r.xread({"sotercare_history": last_id}, count=50, block=1000)
+                results = self.redis.xread(
+                    {REDIS_STREAM: last_id}, count=1, block=1000
+                )
                 if results:
                     for _, messages in results:
                         for msg_id, fields in messages:
-                            last_id = msg_id
-                            ts_s = float(fields.get("ts", time.time()))
-                            client.add_record({
-                                "payload": {
-                                    "temp":           float(fields.get("temp", 0)),
-                                    "ambientTemp":    float(fields.get("ambientTemp", 0)),
-                                    "moisture":       int(fields.get("moisture", 0)),
-                                    "gait_label":     fields.get("gaitLabel", "N/A").lower().replace("_", " ").replace("-", " ").strip(),
-                                    "sos_trigger":    int(fields.get("sos", 0)) == 1,
-                                    "fall_alert":     int(fields.get("fallAlert", 0)) == 1,
-                                    "unix_timestamp": int(ts_s),
-                                }
-                            })
+                            new_last_id = msg_id
+                            entry = self._parse_fields(fields)
             except redis.exceptions.ConnectionError:
-                logger.warning("Redis unavailable — retrying in 5s")
+                logger.warning("[REDIS] Unavailable — retry in 5 s")
                 time.sleep(5)
+                continue
             except Exception as e:
-                logger.error(f"Redis tail error: {e}")
+                logger.error(f"[REDIS] Read error: {e}")
+                time.sleep(1)
+                continue
+
+            if entry is None:
+                # No valid data — loop immediately (don't sleep, xread already blocked)
+                continue
+
+            # ── Send exclusively via WS ────────
+            sent = False
+            if self.ws_authenticated:
+                sent = self._send_ws_one(entry)
+            else:
+                logger.warning("[SYNC] WS not authenticated yet — waiting")
+                # wait a bit for ws to reconnect or authenticate
                 time.sleep(1)
 
-    except ImportError:
-        logger.warning("Redis not installed — falling back to dummy data")
-        import itertools
-        for _ in itertools.count():
-            client.add_record({
-                "payload": {
-                    "temp": 36.6,
-                    "ambientTemp": 25.0,
-                    "moisture": 300,
-                    "gait_label": "walking",
-                    "sos_trigger": False,
-                    "thighnode_status": "mock",
-                    "fall_alert": False,
-                    "unix_timestamp": int(time.time())
-                }
-            })
-            time.sleep(1.0)
+            if sent:
+                last_id = new_last_id          # advance cursor on success
+                retry_delay = RETRY_BASE_S
 
+                # Pace to SEND_INTERVAL_S (CJS: setInterval 1000 ms)
+                elapsed = time.time() - cycle_start
+                sleep_for = max(0.0, SEND_INTERVAL_S - elapsed)
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+            else:
+                retry_delay = min(retry_delay * 2, RETRY_MAX_S)
+                logger.warning(f"[SYNC] Send failed — backoff {retry_delay:.0f} s")
+                time.sleep(retry_delay)
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+def run_gateway() -> None:
+    client = GatewayClient()
+
+    threading.Thread(
+        target=client.connect_ws, daemon=True, name="WSConnect"
+    ).start()
+    
+    # Wait up to 10 s for WS to connect AND device_auth ack to arrive
+    # before starting the sync loop (mirrors CJS flow where sends start
+    # only inside the authAck callback)
+    logger.info("[SYNC] Waiting for WS auth (up to 10 s)…")
+    if client._auth_done.wait(timeout=10.0):
+        if client.ws_authenticated:
+            logger.info("[SYNC] WS auth confirmed — starting sync loop")
+        else:
+            logger.warning("[SYNC] WS auth disconnected or failed")
+    else:
+        logger.warning("[SYNC] WS auth timed out after 10 s")
+
+    client.run_sync_loop()
 
 if __name__ == "__main__":
     try:
         run_gateway()
     except KeyboardInterrupt:
-        logger.info("Shutting down.")
+        logger.info("[SYNC] Shutting down.")
