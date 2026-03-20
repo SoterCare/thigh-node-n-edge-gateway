@@ -13,6 +13,7 @@ import logging
 import threading
 import socketio
 import requests
+import redis
 from typing import Dict, Any, List
 from dotenv import load_dotenv
 
@@ -28,7 +29,6 @@ FLUSH_INTERVAL_S  = float(os.getenv("FLUSH_INTERVAL_S", "5"))   # seconds betwee
 RETRY_BASE_S      = int(os.getenv("RETRY_BASE_MS", "1000")) / 1000
 RETRY_MAX_S       = int(os.getenv("RETRY_MAX_MS", "60000")) / 1000
 DEVICE_ID         = os.getenv("DEVICE_ID", "pi-ffc585939c23")
-DISK_SPOOL_FILE   = "pending_logs.jsonl"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,9 +51,7 @@ class GatewayClient:
             logger=False,
             engineio_logger=False,
         )
-        self._queue: List[Dict[str, Any]] = []
-        self._lock   = threading.Lock()
-        self._id_seq = 0
+        self.redis = redis.Redis(host="localhost", port=6379, decode_responses=True)
 
         self.ws_authenticated = False
 
@@ -62,7 +60,6 @@ class GatewayClient:
         }
 
         self._setup_socket_events()
-        self._load_spool()
 
     # ── Socket.IO ─────────────────────────────────────────────────────────────
     def _setup_socket_events(self) -> None:
@@ -106,28 +103,6 @@ class GatewayClient:
             self.ws_authenticated = True
             logger.info("WS authenticated — will send data via WebSocket")
 
-    # ── Disk spool ────────────────────────────────────────────────────────────
-    def _load_spool(self) -> None:
-        if not os.path.exists(DISK_SPOOL_FILE):
-            return
-        try:
-            with open(DISK_SPOOL_FILE) as f:
-                for line in f:
-                    if line.strip():
-                        self._queue.append(json.loads(line))
-            logger.info(f"Loaded {len(self._queue)} spooled records")
-        except Exception as e:
-            logger.error(f"Spool load error: {e}")
-
-    def _save_spool(self, snapshot: List[Dict]) -> None:
-        """Persist queue snapshot to disk (call WITHOUT holding _lock)."""
-        try:
-            with open(DISK_SPOOL_FILE, "w") as f:
-                for r in snapshot:
-                    f.write(json.dumps(r) + "\n")
-        except Exception as e:
-            logger.error(f"Spool save error: {e}")
-
     # ── Device registration ───────────────────────────────────────────────────
     def register_device(self) -> None:
         url = f"{SERVER_BASE_URL}/devices/register"
@@ -160,44 +135,46 @@ class GatewayClient:
 
     # ── Enqueue (called from Redis tail thread) ───────────────────────────────
     def add_record(self, record: Dict[str, Any]) -> None:
-        """Thread-safe enqueue only. Flushing is handled by the flush thread."""
-        with self._lock:
-            self._id_seq += 1
-            record["local_id"] = self._id_seq
-            self._queue.append(record)
+        """Push record directly to Redis pending queue."""
+        try:
             self.counters["generated"] += 1
+            self.redis.rpush("sotercare_pending_queue", json.dumps(record))
+        except Exception as e:
+            logger.error(f"Failed to push to Redis queue: {e}")
 
     # ── Flush thread ──────────────────────────────────────────────────────────
     def start_flush_thread(self) -> None:
-        """Start the single background thread that drains the queue on a timer."""
+        """Background thread that continuously drains the Redis queue to the backend."""
         def _loop():
             retry_delay = RETRY_BASE_S
             while True:
-                time.sleep(FLUSH_INTERVAL_S)
-                with self._lock:
-                    if not self._queue:
+                try:
+                    # Read up to BATCH_SIZE items
+                    items = self.redis.lrange("sotercare_pending_queue", 0, BATCH_SIZE - 1)
+                    if not items:
+                        time.sleep(FLUSH_INTERVAL_S)
                         continue
-                    batch = self._queue[:BATCH_SIZE]
 
-                success = self._try_send(batch)
+                    batch = [json.loads(item) for item in items]
+                    success = self._try_send(batch)
 
-                with self._lock:
                     if success:
-                        sent_ids = {r["local_id"] for r in batch}
-                        self._queue = [r for r in self._queue if r["local_id"] not in sent_ids]
+                        # Remove exactly the items we just successfully sent
+                        self.redis.ltrim("sotercare_pending_queue", len(batch), -1)
                         self.counters["sent"] += len(batch)
                         retry_delay = RETRY_BASE_S   # reset backoff
-                        snap = list(self._queue)
+
+                        # Sleep to govern the send rate, even during backlog sync
+                        time.sleep(FLUSH_INTERVAL_S)
                     else:
                         self.counters["failed"] += len(batch)
-                        snap = list(self._queue)
+                        retry_delay = min(retry_delay * 2, RETRY_MAX_S)
+                        logger.warning(f"Send failed — backing off {retry_delay:.0f}s")
+                        time.sleep(retry_delay)
 
-                self._save_spool(snap)
-
-                if not success:
-                    retry_delay = min(retry_delay * 2, RETRY_MAX_S)
-                    logger.warning(f"Send failed — backing off {retry_delay:.0f}s")
-                    time.sleep(retry_delay)
+                except Exception as e:
+                    logger.error(f"Flush loop error: {e}")
+                    time.sleep(FLUSH_INTERVAL_S)
 
         t = threading.Thread(target=_loop, daemon=True, name="FlushThread")
         t.start()
@@ -296,8 +273,7 @@ def run_gateway() -> None:
 
     # Redis tail — just enqueues, never flushes
     try:
-        import redis
-        r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+        r = client.redis
         last_id = "$"
         logger.info("Tailing Redis stream 'sotercare_history'...")
 
