@@ -13,8 +13,11 @@ if ("speechSynthesis" in window) {
 // ── Medical Audio Engine ───────────────────────────────────────────────────────
 let audioCtx = null;
 let globalVolume = 1.0; // Exported for the playSiren function context
+let isAudioUnlocked = false;
+window.activeUtterances = window.activeUtterances || [];
 
 function playSiren() {
+  if (!isAudioUnlocked) return;
   try {
     if (!audioCtx) {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
@@ -43,7 +46,7 @@ function playSiren() {
 }
 
 function speakEvent(text, priority = false) {
-  if (!("speechSynthesis" in window)) return;
+  if (!("speechSynthesis" in window) || !isAudioUnlocked) return;
 
   try {
     // Chrome bug workaround: sometimes speech synthesis gets stuck. Resuming helps.
@@ -54,10 +57,12 @@ function speakEvent(text, priority = false) {
     // If high priority (Help Call/Fall), cancel whatever is currently speaking
     if (priority) {
       window.speechSynthesis.cancel();
+      window.activeUtterances = [];
     }
 
     // If already speaking and not high priority, queue it (which browser does by default)
     const utterance = new SpeechSynthesisUtterance(text);
+    window.activeUtterances.push(utterance);
 
     // Try to find a pleasant female voice loaded by the OS/Browser
     const voices = window.speechSynthesis.getVoices();
@@ -81,9 +86,13 @@ function speakEvent(text, priority = false) {
     utterance.volume = globalVolume;
 
     // Safety fallback: if it hangs, force cancel after 10 seconds
-    utterance.onend = () => {};
+    utterance.onend = () => {
+      window.activeUtterances = window.activeUtterances.filter(u => u !== utterance);
+    };
     utterance.onerror = () => {
+      window.activeUtterances = window.activeUtterances.filter(u => u !== utterance);
       window.speechSynthesis.cancel();
+      window.activeUtterances = [];
     };
 
     window.speechSynthesis.speak(utterance);
@@ -574,6 +583,7 @@ export default function App() {
       if (audioCtx.state === "suspended") {
         audioCtx.resume();
       }
+      isAudioUnlocked = true;
 
       // Play a short silent oscillator to definitively lock it in
       const osc = audioCtx.createOscillator();
@@ -590,9 +600,17 @@ export default function App() {
           window.speechSynthesis.resume();
         }
         window.speechSynthesis.cancel(); // clear stuck queue
+        window.activeUtterances = [];
         // Important: Actually speak a word on click so the browser registers the user gesture
         const u = new SpeechSynthesisUtterance("Audio Active");
+        window.activeUtterances.push(u);
         u.volume = 0;
+        u.onend = () => {
+          window.activeUtterances = window.activeUtterances.filter(item => item !== u);
+        };
+        u.onerror = () => {
+          window.activeUtterances = window.activeUtterances.filter(item => item !== u);
+        };
         window.speechSynthesis.speak(u);
       }
       setAudioUnlocked(true);
@@ -656,6 +674,7 @@ export default function App() {
             ...p,
           ].slice(0, MAX_EVENTS),
         );
+        speakEvent("Thigh node is offline. Please check connection.", true);
       } else if (nowOnline && !wasOnline.current) {
         // Just came online
         wasOnline.current = true;
@@ -770,6 +789,7 @@ export default function App() {
         detail: "Dashboard WebSocket established",
         time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
       });
+      speakEvent("Gateway dashboard connected.");
     });
     socket.on("disconnect", () => {
       setGwConnected(false);
@@ -780,6 +800,7 @@ export default function App() {
         detail: "WebSocket lost — reconnecting",
         time: new Date().toLocaleTimeString("en-GB", { hour12: false }),
       });
+      speakEvent("Gateway dashboard disconnected. Attempting to reconnect.", true);
     });
 
     socket.on("sensor_update", (d) => {
@@ -842,7 +863,7 @@ export default function App() {
             detail: "Please attend to the patient",
             time: t,
           });
-          speakEvent("Moisture detected. Please attend to the patient.");
+          speakEvent("Moisture detected. Please attend to the patient.", mst >= 50);
         }
       } else {
         if (moistureAlertRef.current) moistureAlertRef.current = 0;
@@ -865,6 +886,7 @@ export default function App() {
           });
           speakEvent(
             `High temperature detected. ${tmp.toFixed(1)} degrees celsius.`,
+            tmp > 39.5
           );
         }
       } else {
@@ -896,6 +918,7 @@ export default function App() {
             detail: toWifi ? `RSSI: ${d.rssi} dBm` : "Wi-Fi signal lost",
             time: t,
           });
+          speakEvent(`Thigh node connected via ${toWifi ? "Wi-Fi" : "B L E"}.`);
         }
         prevSource.current = d.source;
 
@@ -913,6 +936,7 @@ export default function App() {
               detail: `RSSI is very low: ${rssiVal} dBm. Move gateway closer.`,
               time: t,
             });
+            speakEvent("Warning: Weak Wi-Fi signal detected from thigh node.");
           }
         }
 
@@ -929,6 +953,7 @@ export default function App() {
               detail: "Check room climate control",
               time: t,
             });
+            speakEvent(`Room temperature is ${amb > 35 ? "too high" : "too low"}.`);
           }
         }
       }
