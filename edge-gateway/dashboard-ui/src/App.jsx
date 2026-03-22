@@ -48,56 +48,52 @@ function playSiren() {
 function speakEvent(text, priority = false) {
   if (!("speechSynthesis" in window) || !isAudioUnlocked) return;
 
-  try {
-    // Chrome bug workaround: sometimes speech synthesis gets stuck. Resuming helps.
+  const performSpeak = () => {
+    try {
+      const utterance = new SpeechSynthesisUtterance(text);
+      window.activeUtterances.push(utterance);
+
+      const voices = window.speechSynthesis.getVoices();
+      const femaleVoice = voices.find((v) => {
+        const n = v.name.toLowerCase();
+        return (
+          n.includes("female") ||
+          n.includes("zira") ||
+          n.includes("samantha") ||
+          n.includes("siri") ||
+          n.includes("google uk english female")
+        );
+      });
+
+      if (femaleVoice) utterance.voice = femaleVoice;
+      utterance.pitch = 1.1;
+      utterance.rate = 1.0;
+      utterance.volume = globalVolume;
+
+      utterance.onend = () => {
+        window.activeUtterances = window.activeUtterances.filter(u => u !== utterance);
+      };
+      utterance.onerror = (e) => {
+        console.error("SpeechSynthesis error:", e);
+        window.activeUtterances = window.activeUtterances.filter(u => u !== utterance);
+      };
+
+      window.speechSynthesis.speak(utterance);
+    } catch (err) {
+      console.error("Speech Synthesis speak failed:", err);
+    }
+  };
+
+  if (priority) {
+    window.speechSynthesis.cancel();
+    window.activeUtterances = [];
+    // Small delay for browser to clear the speech engine state
+    setTimeout(performSpeak, 50);
+  } else {
     if (window.speechSynthesis.paused) {
       window.speechSynthesis.resume();
     }
-
-    // If high priority (Help Call/Fall), cancel whatever is currently speaking
-    if (priority) {
-      window.speechSynthesis.cancel();
-      window.activeUtterances = [];
-    }
-
-    // If already speaking and not high priority, queue it (which browser does by default)
-    const utterance = new SpeechSynthesisUtterance(text);
-    window.activeUtterances.push(utterance);
-
-    // Try to find a pleasant female voice loaded by the OS/Browser
-    const voices = window.speechSynthesis.getVoices();
-    const femaleVoice = voices.find((v) => {
-      const n = v.name.toLowerCase();
-      return (
-        n.includes("female") ||
-        n.includes("zira") ||
-        n.includes("samantha") ||
-        n.includes("siri") ||
-        n.includes("google UK English Female")
-      );
-    });
-
-    if (femaleVoice) {
-      utterance.voice = femaleVoice;
-    }
-
-    utterance.pitch = 1.1;
-    utterance.rate = 1.0;
-    utterance.volume = globalVolume;
-
-    // Safety fallback: if it hangs, force cancel after 10 seconds
-    utterance.onend = () => {
-      window.activeUtterances = window.activeUtterances.filter(u => u !== utterance);
-    };
-    utterance.onerror = () => {
-      window.activeUtterances = window.activeUtterances.filter(u => u !== utterance);
-      window.speechSynthesis.cancel();
-      window.activeUtterances = [];
-    };
-
-    window.speechSynthesis.speak(utterance);
-  } catch (err) {
-    console.error("Speech Synthesis failed:", err);
+    performSpeak();
   }
 }
 
@@ -701,7 +697,7 @@ export default function App() {
             },
             ...p,
           ].slice(0, MAX_EVENTS));
-          speakEvent("Warning: Low data rate detected from thigh node.");
+          speakEvent("Warning: Low data rate detected from thigh node.", true);
         }
       }
 
@@ -809,7 +805,7 @@ export default function App() {
 
       // Prevent Redis history replay from faking an online status
       const packetAgeMs = Math.abs(Date.now() - parseFloat(d.ts) * 1000);
-      const isHistorical = packetAgeMs > 15000; // Older than 15s
+      const isHistorical = packetAgeMs > 10800000; // 3 hour threshold for clock drift
 
       if (!isHistorical) {
         hzRef.current++;
@@ -863,7 +859,7 @@ export default function App() {
             detail: "Please attend to the patient",
             time: t,
           });
-          speakEvent("Moisture detected. Please attend to the patient.", mst >= 50);
+          speakEvent("Moisture detected. Please attend to the patient.", true);
         }
       } else {
         if (moistureAlertRef.current) moistureAlertRef.current = 0;
@@ -886,7 +882,7 @@ export default function App() {
           });
           speakEvent(
             `High temperature detected. ${tmp.toFixed(1)} degrees celsius.`,
-            tmp > 39.5
+            true
           );
         }
       } else {
@@ -906,7 +902,7 @@ export default function App() {
             detail: `Connected via ${d.source === "wifi" ? "Wi-Fi" : "BLE"} · ${label}`,
             time: t,
           });
-          speakEvent("Thigh node is online.");
+          speakEvent("Thigh node is online.", true);
         } else if (d.source !== prevSource.current && prevSource.current) {
           const toWifi = d.source === "wifi";
           addEvent({
@@ -918,7 +914,7 @@ export default function App() {
             detail: toWifi ? `RSSI: ${d.rssi} dBm` : "Wi-Fi signal lost",
             time: t,
           });
-          speakEvent(`Thigh node connected via ${toWifi ? "Wi-Fi" : "B L E"}.`);
+          speakEvent(`Thigh node connected via ${toWifi ? "Wi-Fi" : "Bluetooth"}.`, true);
         }
         prevSource.current = d.source;
 
@@ -936,7 +932,7 @@ export default function App() {
               detail: `RSSI is very low: ${rssiVal} dBm. Move gateway closer.`,
               time: t,
             });
-            speakEvent("Warning: Weak Wi-Fi signal detected from thigh node.");
+            speakEvent("Warning: Weak Wi-Fi signal detected from thigh node.", true);
           }
         }
 
@@ -953,7 +949,7 @@ export default function App() {
               detail: "Check room climate control",
               time: t,
             });
-            speakEvent(`Room temperature is ${amb > 35 ? "too high" : "too low"}.`);
+            speakEvent(`Room temperature is ${amb > 35 ? "too high" : "too low"}.`, true);
           }
         }
       }
@@ -980,7 +976,7 @@ export default function App() {
                 detail: `Patient is ${norm}`,
                 time: t,
               });
-              speakEvent(`Patient is ${norm}.`);
+              speakEvent(`Patient is ${norm}.`, true);
             }
           }
         }
@@ -1064,7 +1060,7 @@ export default function App() {
               rssi={online ? data?.rssi : null}
               source={data?.source}
             />
-            <span style={{ fontSize: 10, color: "var(--text-3)" }}>
+            <span style={{ fontSize: 13, color: "var(--text-3)", fontWeight: 600 }}>
               {online && data?.rssi && data.rssi !== "N/A"
                 ? `${data.rssi} dBm`
                 : "—"}
