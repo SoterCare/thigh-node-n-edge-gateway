@@ -453,9 +453,6 @@ def pipeline_thread():
                             gait_label = smoother.update(raw_label)
                     except Exception as e:
                         print(f"[AI] Inference error: {e}")
-            
-            # Maintain the window by keeping the last 'win' samples to avoid memory leak
-            # Always trim once the window is full, regardless of whether inference ran.
             imu_window = win_ref[-win:]
 
         # Write to Redis
